@@ -62,7 +62,7 @@ func GetDomainNodeLock(domain, group, proxyName string) *sync.RWMutex {
     h.Write([]byte(proxyName))
     hash := h.Sum32()
     
-    return shardedLocks[hash&255]
+    return shardedLocks[hash&1023]
 }
 
 func GetAtomicManager() *AtomicRecordManager {
