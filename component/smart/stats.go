@@ -276,7 +276,7 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 }
 
 // 获取节点权重排名
-func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool) (map[string]string, error) {
+func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxies []string) (map[string]string, error) {
     cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
     
     cachedData, ok := GetCacheValue(cacheKey)
@@ -305,7 +305,12 @@ func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool) (map[
         return make(map[string]string), nil
     }
     
-    allNodes, _ := s.GetAllNodesForGroup(group, config)
+    var allNodes []string
+    if len(proxies) > 0 {
+        allNodes = proxies
+    } else {
+        allNodes, _ = s.GetAllNodesForGroup(group, config)
+    }
         
     nodeDataMap := make(map[string]*struct{
         tcpWeights    float64
@@ -553,9 +558,11 @@ func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool) (map[
         }
     }
     
-    for _, nodeName := range allNodes {
-        if _, exists := nodeWeights[nodeName]; !exists {
-            result[nodeName] = RankRarelyUsed
+    if len(nodeWeights) > 0 {
+        for _, nodeName := range allNodes {
+            if _, exists := nodeWeights[nodeName]; !exists {
+                result[nodeName] = RankRarelyUsed
+            }
         }
     }
 

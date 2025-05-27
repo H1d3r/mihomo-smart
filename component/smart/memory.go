@@ -507,7 +507,7 @@ func (s *Store) AdjustCacheParameters() {
 }
 
 // 预加载频繁使用的数据
-func (s *Store) PreloadFrequentData(group, config string) {
+func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
     log.Infoln("[SmartStore] Starting data preloading for group [%s], config [%s]", group, config)
     
     memUsage := GetSystemMemoryUsage()
@@ -535,7 +535,7 @@ func (s *Store) PreloadFrequentData(group, config string) {
         nodeStatesCount = len(stateData)
     }
     
-    ranking, _ := s.GetNodeWeightRanking(group, config, true)
+    ranking, _ := s.GetNodeWeightRanking(group, config, true, proxies)
     
     domains, err := s.GetActiveDomains(group, config, domainLimit)
     if err == nil && len(domains) > 0 {

@@ -371,7 +371,12 @@ func (s *Smart) InitializeCache() {
 
     s.startTimedTask(5*time.Minute, checkInterval, "Clean up nodes", s.cleanupOrphanedNodeCache, true)
     s.startTimedTask(10*time.Second, checkInterval, "Preload frequent data", func() {
-        s.store.PreloadFrequentData(s.Name(), s.configName)
+        proxies := s.GetProxies(false)
+        proxyNames := make([]string, 0, len(proxies))
+        for _, p := range proxies {
+            proxyNames = append(proxyNames, p.Name())
+        }
+        s.store.PreloadFrequentData(s.Name(), s.configName, proxyNames)
     }, true)
     s.startTimedTask(5*time.Minute, prefetchInterval, "prefetch", s.runPrefetch, false)
     s.startTimedTask(5*time.Minute, rankingInterval, "ranking", s.updateNodeRanking, false)
@@ -462,7 +467,12 @@ func (s *Smart) updateNodeRanking() {
 
 	log.Debugln("[Smart] Starting node ranking update for policy group [%s]", s.Name())
 
-	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, false)
+    proxies := s.GetProxies(false)
+    proxyNames := make([]string, 0, len(proxies))
+    for _, p := range proxies {
+        proxyNames = append(proxyNames, p.Name())
+    }
+    ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, false, proxyNames)
 	if err != nil {
 		log.Warnln("[Smart] Failed to update node ranking: %v", err)
 		return

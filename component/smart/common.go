@@ -318,20 +318,20 @@ func getSystemMemoryLimit() float64 {
                     }
                 }
             }
-        } else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-            output, err = cmd.ExecCmd("grep MemTotal /proc/meminfo")
-            if err == nil {
-                parts := strings.Fields(output)
-                if len(parts) >= 2 {
-                    memStr := strings.TrimSuffix(parts[1], "kB")
-                    memStr = strings.TrimSpace(memStr)
-                    memKB, parseErr := strconv.ParseFloat(memStr, 64)
-                    if parseErr == nil {
-                        memTotal = memKB / 1024.0
+            } else if runtime.GOOS == "linux" || runtime.GOOS == "android" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
+                output, err = cmd.ExecCmd("grep MemTotal /proc/meminfo")
+                if err == nil {
+                    parts := strings.Fields(output)
+                    if len(parts) >= 2 {
+                        memStr := strings.TrimSuffix(parts[1], "kB")
+                        memStr = strings.TrimSpace(memStr)
+                        memKB, parseErr := strconv.ParseFloat(memStr, 64)
+                        if parseErr == nil {
+                            memTotal = memKB / 1024.0
+                        }
                     }
                 }
             }
-        }
         
         memTotal = memTotal / 4.0
         

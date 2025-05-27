@@ -131,8 +131,23 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	proxies := smartGroup.GetProxies(false)
+	proxyNames := make([]string, 0, len(proxies))
+	for _, p := range proxies {
+		proxyNames = append(proxyNames, p.Name())
+	}
+
+	if len(proxyNames) == 0 {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, render.M{
+			"weights": map[string]string{},
+			"message": "No available proxies in this group",
+		})
+		return
+	}
 	
-	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, false)
+	weights, err := smartStore.GetStore().GetNodeWeightRanking(groupName, configName, false, proxyNames)
 
 	if err != nil {
 		log.Warnln("[Smart] Failed to get weight ranking: %s", err.Error())
