@@ -120,6 +120,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	tunnel.OnRunning()
 	updateUpdater(cfg)
 
+	initializeSmartGroups(cfg.Proxies)
+	
 	resolver.ResetConnection()
 }
 
@@ -523,10 +525,35 @@ func updateIPTables(cfg *config.Config) {
 	log.Infoln("[IPTABLES] Setting iptables completed")
 }
 
+func initializeSmartGroups(proxies map[string]C.Proxy) {
+	closeSmartGroups()
+    for _, proxy := range proxies {
+        if proxy.Type() == C.Smart {
+            if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
+                log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
+                smart.InitializeCache()
+            }
+        }
+    }
+}
+
+func closeSmartGroups() {
+    for _, proxy := range tunnel.Proxies() {
+        if proxy.Type() == C.Smart {
+            adapter := proxy.Adapter()
+            if smart, ok := adapter.(*outboundgroup.Smart); ok {
+                smart.Close()
+            }
+        }
+    }
+}
+
 func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+
+	closeSmartGroups()
 
 	log.Warnln("Mihomo shutting down")
 }

@@ -107,8 +107,9 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 }
 
 func (tt *tcpTracker) Close() error {
+	connErr := tt.Conn.Close()
 	tt.manager.Leave(tt)
-	return tt.Conn.Close()
+	return connErr
 }
 
 func (tt *tcpTracker) Upstream() any {
@@ -118,20 +119,24 @@ func (tt *tcpTracker) Upstream() any {
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
 
+	trackerUUID := utils.NewUUIDV4()
+    
+	metadata.UUID = trackerUUID.String()
+
 	t := &tcpTracker{
-		Conn:    conn,
-		manager: manager,
-		TrackerInfo: &TrackerInfo{
-			UUID:          utils.NewUUIDV4(),
-			Start:         time.Now(),
-			Metadata:      metadata,
-			Chain:         conn.Chains(),
-			Rule:          "",
-			UploadTotal:   atomic.NewInt64(uploadTotal),
-			DownloadTotal: atomic.NewInt64(downloadTotal),
-		},
-		pushToManager: pushToManager,
-	}
+        Conn:    conn,
+        manager: manager,
+        TrackerInfo: &TrackerInfo{
+            UUID:          trackerUUID,
+            Start:         time.Now(),
+            Metadata:      metadata,
+            Chain:         conn.Chains(),
+            Rule:          "",
+            UploadTotal:   atomic.NewInt64(uploadTotal),
+            DownloadTotal: atomic.NewInt64(downloadTotal),
+        },
+        pushToManager: pushToManager,
+    }
 
 	if pushToManager {
 		if uploadTotal > 0 {
@@ -198,8 +203,9 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 func (ut *udpTracker) Close() error {
+	connErr := ut.PacketConn.Close()
 	ut.manager.Leave(ut)
-	return ut.PacketConn.Close()
+	return connErr
 }
 
 func (ut *udpTracker) Upstream() any {
@@ -209,17 +215,21 @@ func (ut *udpTracker) Upstream() any {
 func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
 
+	trackerUUID := utils.NewUUIDV4()
+    
+	metadata.UUID = trackerUUID.String()
+
 	ut := &udpTracker{
-		PacketConn: conn,
-		manager:    manager,
-		TrackerInfo: &TrackerInfo{
-			UUID:          utils.NewUUIDV4(),
-			Start:         time.Now(),
-			Metadata:      metadata,
-			Chain:         conn.Chains(),
-			Rule:          "",
-			UploadTotal:   atomic.NewInt64(uploadTotal),
-			DownloadTotal: atomic.NewInt64(downloadTotal),
+    	PacketConn: conn,
+    	manager:    manager,
+    	TrackerInfo: &TrackerInfo{
+    		UUID:          trackerUUID,
+    		Start:         time.Now(),
+    		Metadata:      metadata,
+    		Chain:         conn.Chains(),
+    		Rule:          "",
+    		UploadTotal:   atomic.NewInt64(uploadTotal),
+    		DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
 		pushToManager: pushToManager,
 	}

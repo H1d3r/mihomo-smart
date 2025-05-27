@@ -187,6 +187,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return NewLoadBalance(groupOption, providers, strategy)
 	case "relay":
 		group = NewRelay(groupOption, providers)
+	case "smart":
+		opts := parseSmartOption(config)
+		group = NewSmart(groupOption, providers, opts...)
 	default:
 		return nil, fmt.Errorf("%w: %s", errType, groupOption.Type)
 	}

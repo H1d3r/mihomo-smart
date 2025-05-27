@@ -72,6 +72,7 @@ require (
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cloudflare/circl v1.3.7 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dmitryikh/leaves v0.0.0-20230708180554-25d19a787328 // indirect
 	github.com/ebitengine/purego v0.8.3 // indirect
 	github.com/ericlagergren/aegis v0.0.0-20250325060835-cd0defd64358 // indirect
 	github.com/ericlagergren/polyval v0.0.0-20220411101811-e25bc10ba391 // indirect

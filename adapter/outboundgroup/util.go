@@ -8,3 +8,4 @@ type SelectAble interface {
 var _ SelectAble = (*Fallback)(nil)
 var _ SelectAble = (*URLTest)(nil)
 var _ SelectAble = (*Selector)(nil)
+var _ SelectAble = (*Smart)(nil)
