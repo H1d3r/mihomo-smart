@@ -309,7 +309,6 @@ func (s *Store) LoadASNsToCache(group, config string, asns []string) int {
     return loadedCount
 }
 
-// 存储解包结果
 func (s *Store) StoreUnwrapResult(group, config string, target string, proxyName string) {
     if target == "" || proxyName == "" {
         return
@@ -319,7 +318,6 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, proxyName
     SetCacheValue(key, proxyName)
 }
 
-// 获取解包结果
 func (s *Store) GetUnwrapResult(group, config string, target string) string {
     if target == "" {
         return ""

@@ -679,16 +679,21 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
             return "", 0, nil, errors.New("no valid nodes for ASN")
         }
 
-        requiredNodeCount := availableNodesCount / 3
-        if requiredNodeCount < 10 {
-            if availableNodesCount < 10 {
-                requiredNodeCount = availableNodesCount / 2
-                if requiredNodeCount < 1 {
-                    requiredNodeCount = 1
-                }
-            } else {
-                requiredNodeCount = 10
+        var requiredNodeCount int
+        switch {
+        case availableNodesCount < 10:
+            requiredNodeCount = availableNodesCount / 2
+            if requiredNodeCount < 1 {
+                requiredNodeCount = 1
             }
+        case availableNodesCount < 30:
+            requiredNodeCount = availableNodesCount / 4
+        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1
+            requiredNodeCount = 4
+        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05
+            requiredNodeCount = 2
+        default:
+            requiredNodeCount = 5
         }
 
         if len(nodesWithWeight) >= requiredNodeCount {
@@ -759,16 +764,21 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
             }
         }
         
-        requiredNodeCount := availableNodesCount / 3
-        if requiredNodeCount < 10 {
-            if availableNodesCount < 10 {
-                requiredNodeCount = availableNodesCount / 2
-                if requiredNodeCount < 1 {
-                    requiredNodeCount = 1
-                }
-            } else {
-                requiredNodeCount = 10
+        var requiredNodeCount int
+        switch {
+        case availableNodesCount < 10:
+            requiredNodeCount = availableNodesCount / 2
+            if requiredNodeCount < 1 {
+                requiredNodeCount = 1
             }
+        case availableNodesCount < 30:
+            requiredNodeCount = availableNodesCount / 4
+        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1
+            requiredNodeCount = 4
+        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05
+            requiredNodeCount = 2
+        default:
+            requiredNodeCount = 5
         }
         
         if len(nodesWithWeight) >= requiredNodeCount {
