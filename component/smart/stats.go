@@ -688,9 +688,9 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
             }
         case availableNodesCount < 30:
             requiredNodeCount = availableNodesCount / 4
-        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1
+        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1:
             requiredNodeCount = 4
-        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05
+        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05:
             requiredNodeCount = 2
         default:
             requiredNodeCount = 5
@@ -773,9 +773,9 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
             }
         case availableNodesCount < 30:
             requiredNodeCount = availableNodesCount / 4
-        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1
+        case availableNodesCount > 50 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.1:
             requiredNodeCount = 4
-        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05
+        case availableNodesCount > 100 && len(nodesWithWeight) > 0 && float64(len(nodesWithWeight))/float64(availableNodesCount) < 0.05:
             requiredNodeCount = 2
         default:
             requiredNodeCount = 5
