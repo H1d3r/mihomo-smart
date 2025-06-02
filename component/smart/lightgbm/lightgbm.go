@@ -412,7 +412,8 @@ func (m *WeightModel) PredictWeight(input *ModelInput, priorityFactor float64) (
     }
 
     m.mutex.RLock()
-    defer m.mutex.RUnlock()
+    model := m.model
+    m.mutex.RUnlock()
     
     if m.model == nil {
         return smart.CalculateWeight(
