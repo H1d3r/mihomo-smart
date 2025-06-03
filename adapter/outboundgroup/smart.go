@@ -1333,12 +1333,8 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
                 return
             }
         }
-        
-        log.Debugln("[Smart] No tracker found for connection %s:%d -> %s:%d using ID: %s", 
-            metadata.SrcIP.String(), metadata.SrcPort, 
-            metadata.DstIP.String(), metadata.DstPort, 
-            metadata.UUID)
-        s.recordConnectionStats("closed", metadata, proxy, 0, 0, 0, 0, 0, false, nil)
+
+        log.Debugln("[Smart] No tracker found for connection closure")
     })
 }
 
@@ -1358,9 +1354,7 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
             }
         }
         
-        log.Debugln("[Smart] No tracker found for UDP connection to %s using ID: %s", 
-            metadata.RemoteAddress(), metadata.UUID)
-        s.recordConnectionStats("closed", metadata, proxy, 0, 0, 0, 0, 0, false, nil)
+        log.Debugln("[Smart] No tracker found for connection closure")
     })
 }
 
