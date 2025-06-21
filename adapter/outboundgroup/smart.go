@@ -1226,7 +1226,6 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
             
             if input != nil {
                 calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
-                calculatedWeight *= 0.8
             } else {
                 calculatedWeight = smart.CalculateWeight(
                     success, failure, connectTimeVal, latencyVal,
