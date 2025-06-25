@@ -913,18 +913,11 @@ func (s *Smart) checkNodeQualityDegradation(domain, proxyName string, newWeight,
 
 // ASN权重更新
 func (s *Smart) updateAsnWeights(record *smart.AtomicStatsRecord, asnInfo string, weight float64, isUDP bool) {
-    parts := strings.SplitN(asnInfo, " ", 2)
-    if len(parts) == 0 {
-        return
-    }
-    
-    asnNumber := parts[0]
-    
     var asnWeightKey string
     if isUDP {
-        asnWeightKey = smart.WeightTypeUDPASN + ":" + asnNumber
+        asnWeightKey = smart.WeightTypeUDPASN + ":" + asnInfo
     } else {
-        asnWeightKey = smart.WeightTypeTCPASN + ":" + asnNumber
+        asnWeightKey = smart.WeightTypeTCPASN + ":" + asnInfo
     }
     
     record.SetWeight(asnWeightKey, weight)
@@ -1068,11 +1061,8 @@ func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metada
     var asnDisplayInfo string
     
     if asnInfo != "" {
-        parts := strings.SplitN(asnInfo, " ", 2)
-        asnNumber := parts[0]
-        
-        tcpAsnWeightKey := smart.WeightTypeTCPASN + ":" + asnNumber
-        udpAsnWeightKey := smart.WeightTypeUDPASN + ":" + asnNumber
+        tcpAsnWeightKey := smart.WeightTypeTCPASN + ":" + asnInfo
+        udpAsnWeightKey := smart.WeightTypeUDPASN + ":" + asnInfo
         
         if record.Weights != nil {
             if w, ok := record.Weights[tcpAsnWeightKey]; ok {
@@ -1174,6 +1164,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
     if metadata.NetWork == C.UDP {
         weightType = smart.WeightTypeUDP
     }
+
     asnInfo := s.getASNCode(metadata)
     
     lock := smart.GetDomainNodeLock(domain, s.Name(), proxy.Name())
@@ -1459,22 +1450,19 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(domain string, nodeName strin
     
     // 处理ASN相关缓存
     if asnInfo != "" {
-        parts := strings.SplitN(asnInfo, " ", 2)
-        asnNumber := parts[0]
-        
         asnWeightType := smart.WeightTypeTCPASN
         if weightType == smart.WeightTypeUDP {
             asnWeightType = smart.WeightTypeUDPASN
         }
-        fullAsnWeightType := asnWeightType + ":" + asnNumber
+        fullAsnWeightType := asnWeightType + ":" + asnInfo
 
         s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, fullAsnWeightType)
         
-        bestNode, bestWeight, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnNumber, fullAsnWeightType)
+        bestNode, bestWeight, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType)
         if err == nil && bestNode != "" && bestNode != nodeName && bestWeight > 0 {
-            s.store.StorePrefetchResult(s.Name(), s.configName, asnNumber, fullAsnWeightType, bestNode)
+            s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, bestNode)
             log.Debugln("[Smart] Added new ASN prefetch result: [%s] -> [%s] (weight: %.4f, type: %s)", 
-                asnNumber, bestNode, bestWeight, fullAsnWeightType)
+                asnInfo, bestNode, bestWeight, fullAsnWeightType)
         }
     }
 }
