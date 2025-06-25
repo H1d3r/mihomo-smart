@@ -1745,7 +1745,7 @@ func (s *Store) MarkConnectionFailed(group, config, host string) {
 
     groupKey := fmt.Sprintf("%s:%s", group, config)
     
-    key := FormatCacheKey(KeyTypeFailed, config, group, domain)
+    key := FormatCacheKey(KeyTypeFailed, config, group, host)
     SetCacheValue(key, time.Now())
     
     failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")
