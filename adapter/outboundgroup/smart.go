@@ -653,7 +653,10 @@ func (s *Smart) selectProxy(metadata *C.Metadata, touch bool) C.Proxy {
         
         for _, p := range proxies {
             if p.Name() == name {
-                return p
+                if p.AliveForTestUrl(s.testUrl) {
+                    return p
+                }
+                break
             }
         }
         return nil
