@@ -1081,7 +1081,6 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
     asns := s.GetActiveASNs(group, config, prefetchLimit/2)
 
     prefetchCount := 0
-    randomExplorationCount := 0
     algorithmRandomCount := 0
     weightTypes := []string{WeightTypeTCP, WeightTypeUDP}
 
