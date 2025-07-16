@@ -1124,7 +1124,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if int(item.bestWeight*100) != int(oldWeight*100) && item.bestWeight > 0 {
+            if int(item.bestWeight*100) != int(oldWeight*100) {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchCount++
                 log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
@@ -1152,7 +1152,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if int(item.bestWeight*100) != int(oldWeight*100) && item.bestWeight > 0 {
+            if int(item.bestWeight*100) != int(oldWeight*100) {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchCount++
                 log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
