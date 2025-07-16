@@ -1124,13 +1124,13 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if item.bestWeight != oldWeight && item.bestWeight > 0 {
+            if int(item.bestWeight*100) != int(oldWeight*100) && item.bestWeight > 0 {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchCount++
                 log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
-        } else if item.bestWeight > oldWeight {
+        } else if int(item.bestWeight*100) > int(oldWeight*100) {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchCount++
             log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
@@ -1152,13 +1152,13 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
             continue
         }
         if oldNode == item.bestNode {
-            if item.bestWeight != oldWeight && item.bestWeight > 0 {
+            if int(item.bestWeight*100) != int(oldWeight*100) && item.bestWeight > 0 {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
                 prefetchCount++
                 log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
-        } else if item.bestWeight > oldWeight {
+        } else if int(item.bestWeight*100) > int(oldWeight*100) {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
             prefetchCount++
             log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",

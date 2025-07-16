@@ -6,7 +6,6 @@ import (
     "encoding/json"
     "errors"
     "fmt"
-    "runtime"
     "strings"
     "sync"
     "time"
@@ -53,15 +52,8 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
         return nil
     }
 
-    operationCount := len(operations)
-    concurrency := runtime.NumCPU()
-    if operationCount < 200 {
-        if concurrency > 2 {
-            concurrency = 2
-        }
-    } else if concurrency > 8 {
-        concurrency = 8
-    }
+    concurrency := 2
+    batchSize := 100
 
     writeMap := opMapPool.Get().(map[string][]byte)
     cacheUpdates := cacheUpdatePool.Get().(map[string]interface{})
@@ -71,22 +63,13 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
             delete(writeMap, k)
         }
         opMapPool.Put(writeMap)
-        
         for k := range cacheUpdates {
             delete(cacheUpdates, k)
         }
         cacheUpdatePool.Put(cacheUpdates)
     }()
     
-    batchSize := 200
-    if operationCount < 500 {
-        batchSize = 100
-    } else if operationCount > 2000 {
-        batchSize = 300
-    }
-    
-    b, _ := batch.New[struct{}](context.Background(), 
-        batch.WithConcurrencyNum[struct{}](concurrency))
+    b, _ := batch.New[struct{}](context.Background(), batch.WithConcurrencyNum[struct{}](concurrency))
     var writeMapSync sync.Map
     var cacheUpdatesSync sync.Map
     
@@ -98,7 +81,7 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
         if end > len(operations) {
             end = len(operations)
         }
-        
+
         curBatch := operations[start:end]
         b.Go(fmt.Sprintf("batch-%d", i), func() (struct{}, error) {
             for _, op := range curBatch {
@@ -136,7 +119,7 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
                         }
                     case OpSavePrefetch:
                         cacheKey = FormatCacheKey(KeyTypePrefetch, op.Config, op.Group, op.Domain)
-                        var prefetchMap map[string]string
+                        var prefetchMap map[string]interface{}
                         if json.Unmarshal(op.Data, &prefetchMap) == nil {
                             cacheUpdatesSync.Store(cacheKey, prefetchMap)
                         }
@@ -166,60 +149,21 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
     })
     
     var err error
-    if len(writeMap) > 500 {
-        keys := make([]string, 0, len(writeMap))
-        for k := range writeMap {
-            keys = append(keys, k)
+    err = s.db.Batch(func(tx *bbolt.Tx) error {
+        bucket, err := tx.CreateBucketIfNotExists(bucketSmartStats)
+        if err != nil {
+            return err
         }
         
-        batchSize := 200
-        batches := (len(keys) + batchSize - 1) / batchSize
-        
-        for i := 0; i < batches; i++ {
-            start := i * batchSize
-            end := (i + 1) * batchSize
-            if end > len(keys) {
-                end = len(keys)
-            }
-            
-            batchKeys := keys[start:end]
-            batchErr := s.db.Batch(func(tx *bbolt.Tx) error {
-                bucket, err := tx.CreateBucketIfNotExists(bucketSmartStats)
-                if err != nil {
-                    return err
-                }
-                
-                for _, k := range batchKeys {
-                    if err := bucket.Put([]byte(k), writeMap[k]); err != nil {
-                        return err
-                    }
-                }
-                return nil
-            })
-            
-            if batchErr != nil {
-                if err == nil {
-                    err = batchErr
-                }
-                log.Debugln("[SmartStore] Batch save operation failed (batch %d/%d): %v", i+1, batches, batchErr)
-            }
-        }
-    } else {
-        err = s.db.Batch(func(tx *bbolt.Tx) error {
-            bucket, err := tx.CreateBucketIfNotExists(bucketSmartStats)
-            if err != nil {
+        for key, data := range writeMap {
+            if err := bucket.Put([]byte(key), data); err != nil {
                 return err
             }
-            
-            for key, data := range writeMap {
-                if err := bucket.Put([]byte(key), data); err != nil {
-                    return err
-                }
-            }
-            
-            return nil
-        })
-    }
+        }
+        
+        return nil
+    })
+
     
     if len(cacheUpdates) > 0 {
         for key, value := range cacheUpdates {
@@ -275,30 +219,19 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
         lookupToKeys[lookupKey] = append(lookupToKeys[lookupKey], opKey)
     }
     
-    concurrency := runtime.NumCPU()
-    if len(operations) < 100 {
-        if concurrency > 2 {
-            concurrency = 2
-        }
-    } else if concurrency > 8 {
-        concurrency = 8
-    }
+    concurrency := 2
+    batchSize := 100
     
-    b, _ := batch.New[StoreOperation](context.Background(), 
-        batch.WithConcurrencyNum[StoreOperation](concurrency))
+    b, _ := batch.New[StoreOperation](context.Background(), batch.WithConcurrencyNum[StoreOperation](concurrency))
     processGroup := singleflight.Group[StoreOperation]{}
     
-    batchSize := 200
-    if len(operations) < 500 {
-        batchSize = 100
-    }
-    
-    for batchStart := 0; batchStart < len(operations); batchStart += batchSize {
+   for batchStart := 0; batchStart < len(operations); batchStart += batchSize {
         batchEnd := batchStart + batchSize
+
         if batchEnd > len(operations) {
             batchEnd = len(operations)
         }
-        
+
         batchIndex := batchStart
         b.Go(fmt.Sprintf("batch-%d", batchIndex/batchSize), func() (StoreOperation, error) {
             start, end := batchIndex, batchEnd
@@ -389,7 +322,7 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
                             }
                         case OpSavePrefetch:
                             cacheKey = FormatCacheKey(KeyTypePrefetch, op.Config, op.Group, op.Domain)
-                            var prefetchMap map[string]string
+                            var prefetchMap map[string]interface{}
                             if json.Unmarshal(op.Data, &prefetchMap) == nil {
                                 cacheBatch.Store(cacheKey, prefetchMap)
                             }
@@ -459,12 +392,13 @@ func (s *Store) FlushQueue(isThresholdTriggered bool) {
     }
     globalCacheParams.mutex.RUnlock()
 
-    if len(globalOperationQueue) <= 200 {
+    if len(globalOperationQueue) <= 100 {
         ops := globalOperationQueue
         globalOperationQueue = make([]StoreOperation, 0, threshold)
         globalQueueMutex.Unlock()
 
         s.BatchSave(ops)
+        log.Debugln("[SmartStore] Queue datas saved, operations: [%d]", len(ops))
         return
     }
 
@@ -472,39 +406,12 @@ func (s *Store) FlushQueue(isThresholdTriggered bool) {
     globalOperationQueue = make([]StoreOperation, 0, threshold)
     globalQueueMutex.Unlock()
 
-    var maxBatchSize int
+    maxBatchSize := 100
     totalOps := len(ops)
-    
-    if totalOps > 500 {
-        var memStats runtime.MemStats
-        runtime.ReadMemStats(&memStats)
-        memPressure := float64(memStats.Alloc) / float64(memStats.Sys)
-        
-        if memPressure > 0.7 {
-            maxBatchSize = 100
-        } else if memPressure < 0.3 {
-            maxBatchSize = 300
-        } else {
-            maxBatchSize = 200
-        }
-    } else {
-        maxBatchSize = 200
-    }
-
     batchCount := (totalOps + maxBatchSize - 1) / maxBatchSize
-    
-    concurrency := runtime.NumCPU()
-    if totalOps < 1000 {
-        if concurrency > 4 {
-            concurrency = 4
-        }
-    } else if concurrency > 8 {
-        concurrency = 8
-    }
+    concurrency := 2
 
-    b, _ := batch.New[int](context.Background(), 
-        batch.WithConcurrencyNum[int](concurrency))
-    
+    b, _ := batch.New[int](context.Background(), batch.WithConcurrencyNum[int](concurrency))
     opsBatchPool := sync.Pool{
         New: func() interface{} {
             return make([]StoreOperation, 0, maxBatchSize)
@@ -525,24 +432,24 @@ func (s *Store) FlushQueue(isThresholdTriggered bool) {
             batchOps = append(batchOps, ops[startIdx:endIdx]...)
 
             s.BatchSave(batchOps)
-            
+
             for idx := range batchOps {
                 batchOps[idx] = StoreOperation{}
             }
             opsBatchPool.Put(batchOps)
-            
+
             return 0, nil
         })
     }
 
     b.Wait()
-    
+
     for i := range ops {
         ops[i] = StoreOperation{}
     }
     ops = nil
 
-    log.Debugln("[SmartStore] Processed all %d batches (%d operations)", batchCount, totalOps)
+    log.Debugln("[SmartStore] Queue datas saved, operations: [%d]", totalOps)
 }
 
 // 根据路径前缀获取所有匹配的数据
