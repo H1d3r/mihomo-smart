@@ -149,6 +149,24 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
         }
     }
 
+    globalQueueMutex.RLock()
+    for _, op := range globalOperationQueue {
+        if op.Type == OpSavePrefetch && op.Group == group && op.Config == config && op.Domain == target {
+            var prefetchMap map[string]interface{}
+            if err := json.Unmarshal(op.Data, &prefetchMap); err == nil {
+                if res, exists := prefetchMap[weightType]; exists {
+                    if resMap, ok := res.(map[string]interface{}); ok {
+                        node, _ := resMap["node"].(string)
+                        weight, _ := resMap["weight"].(float64)
+                        globalQueueMutex.RUnlock()
+                        return node, weight
+                    }
+                }
+            }
+        }
+    }
+    globalQueueMutex.RUnlock()
+
     dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
     data, err := s.DBViewGetItem(dbKey)
     if err == nil && data != nil {
@@ -407,9 +425,9 @@ func (s *Store) AdjustCacheParameters() {
     StatsCache = newStatsCache
     globalCacheLock.Unlock()
     
-    globalQueueMutex.Lock()
+    globalQueueMutex.RLock()
     queueLength := len(globalOperationQueue)
-    globalQueueMutex.Unlock()
+    globalQueueMutex.RUnlock()
     
     if (memoryUsage > 0.8 && queueLength > 0) || 
        (memoryUsage > 0.6 && queueLength > globalCacheParams.BatchSaveThreshold/2) {

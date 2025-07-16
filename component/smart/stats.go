@@ -1209,13 +1209,13 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
         }
         
         if allFromCache {
-            globalQueueMutex.Lock()
+            globalQueueMutex.RLock()
             for _, op := range globalOperationQueue {
                 if op.Type == OpSaveNodeState && op.Group == group && op.Config == config {
                     result[op.Node] = op.Data
                 }
             }
-            globalQueueMutex.Unlock()
+            globalQueueMutex.RUnlock()
             
             return result, nil
         }
@@ -1246,13 +1246,13 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
         }
     }
     
-    globalQueueMutex.Lock()
+    globalQueueMutex.RLock()
     for _, op := range globalOperationQueue {
         if op.Type == OpSaveNodeState && op.Group == group && op.Config == config {
             result[op.Node] = op.Data
         }
     }
-    globalQueueMutex.Unlock()
+    globalQueueMutex.RUnlock()
     
     return result, nil
 }
@@ -1294,13 +1294,13 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
         }
         
         if allFromCache && len(result) > 0 {
-            globalQueueMutex.Lock()
+            globalQueueMutex.RLock()
             for _, op := range globalOperationQueue {
                 if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
                     result[op.Node] = op.Data
                 }
             }
-            globalQueueMutex.Unlock()
+            globalQueueMutex.RUnlock()
             
             return result, nil
         }
@@ -1330,13 +1330,13 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
         }
     }
     
-    globalQueueMutex.Lock()
+    globalQueueMutex.RLock()
     for _, op := range globalOperationQueue {
         if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
             result[op.Node] = op.Data
         }
     }
-    globalQueueMutex.Unlock()
+    globalQueueMutex.RUnlock()
     
     return result, nil
 }
@@ -1392,7 +1392,7 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
         }
     }
 
-    globalQueueMutex.Lock()
+    globalQueueMutex.RLock()
     for _, op := range globalOperationQueue {
         if op.Type == OpSaveStats && op.Group == group && op.Config == config {
             domain := op.Domain
@@ -1407,7 +1407,7 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
             result[domain][nodeName] = op.Data
         }
     }
-    globalQueueMutex.Unlock()
+    globalQueueMutex.RUnlock()
 
     if len(result) < maxDomainsLimit {
         pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
@@ -1537,7 +1537,7 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
         }
     }
     
-    globalQueueMutex.Lock()
+    globalQueueMutex.RLock()
     for _, op := range globalOperationQueue {
         if (op.Group == group && op.Config == config) {
             if op.Type == OpSaveNodeState {
@@ -1547,7 +1547,7 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
             }
         }
     }
-    globalQueueMutex.Unlock()
+    globalQueueMutex.RUnlock()
     
     var result []string
     for node := range nodesMap {
