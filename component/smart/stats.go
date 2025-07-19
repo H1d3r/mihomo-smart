@@ -676,29 +676,37 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
     availableNodesCount := len(allAvailableNodes)
 
     nodesWithWeight := make(map[string]float64)
-    var domainStats map[string][]byte
-    if stats, ok := allStatsMap[target]; ok {
-        domainStats = stats
-    } else {
-        return "", 0, nodesWithWeight, nil
-    }
-
     asnMode := strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN)
     nodeSamples := make(map[string]int)
-    for nodeName, data := range domainStats {
-        var record StatsRecord
-        if json.Unmarshal(data, &record) != nil {
-            continue
-        }
-        if asnMode {
-            if record.Weights != nil {
-                if weight, ok := record.Weights[weightType]; ok && weight > 0 {
-                    timeDecay := getTimeDecay(record.LastUsed.Unix())
-                    nodesWithWeight[nodeName] += weight * timeDecay
-                    nodeSamples[nodeName]++
+
+    if asnMode {
+        for _, domainStats := range allStatsMap {
+            for nodeName, data := range domainStats {
+                var record StatsRecord
+                if json.Unmarshal(data, &record) != nil {
+                    continue
+                }
+                if record.Weights != nil {
+                    if weight, ok := record.Weights[weightType]; ok && weight > 0 {
+                        timeDecay := getTimeDecay(record.LastUsed.Unix())
+                        nodesWithWeight[nodeName] += weight * timeDecay
+                        nodeSamples[nodeName]++
+                    }
                 }
             }
+        }
+    } else {
+        var domainStats map[string][]byte
+        if stats, ok := allStatsMap[target]; ok {
+            domainStats = stats
         } else {
+            return "", 0, nodesWithWeight, nil
+        }
+        for nodeName, data := range domainStats {
+            var record StatsRecord
+            if json.Unmarshal(data, &record) != nil {
+                continue
+            }
             var weight float64
             if record.Weights != nil {
                 weight = record.Weights[weightType]
@@ -868,13 +876,10 @@ func (h *domainMinHeap) Pop() interface{} {
     return x
 }
 
-func (s *Store) GetActiveDomains(group, config string, limit int, all bool) (map[string][]string, error) {
+func (s *Store) GetActiveDomains(group, config string, limit int, all bool) map[string][]string {
     allStats, err := s.GetAllStats(group, config, all)
-    if err != nil {
-        return nil, err
-    }
-    if len(allStats) == 0 {
-        return nil, nil
+    if err != nil || len(allStats) == 0 {
+        return nil
     }
 
     h := &domainMinHeap{}
@@ -925,7 +930,7 @@ func (s *Store) GetActiveDomains(group, config string, limit int, all bool) (map
     for i := len(sorted) - 1; i >= 0; i-- {
         result[sorted[i].domain] = sorted[i].types
     }
-    return result, nil
+    return result
 }
 
 
@@ -1049,10 +1054,11 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         prefetchLimit = MinPrefetchDomainsLimit
     }
 
-    domains, _ := s.GetActiveDomains(group, config, prefetchLimit, true)
-    asns := s.GetActiveASNs(group, config, prefetchLimit/2, true)
+    domains := s.GetActiveDomains(group, config, prefetchLimit*3/5, true)
+    asns := s.GetActiveASNs(group, config, prefetchLimit*2/5, true)
 
-    prefetchCount := 0
+    prefetchDomains := 0
+    prefetchASNs := 0
 
     type prefetchItem struct {
         target     string
@@ -1118,7 +1124,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         }
         if oldNode == "" {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-            prefetchCount++
+            prefetchDomains++
             log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
                 item.target, item.bestNode, group, item.weightType, item.bestWeight)
             continue
@@ -1126,13 +1132,13 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         if oldNode == item.bestNode {
             if int(item.bestWeight*100) != int(oldWeight*100) {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-                prefetchCount++
+                prefetchDomains++
                 log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
         } else if int(item.bestWeight*100) > int(oldWeight*100) {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-            prefetchCount++
+            prefetchDomains++
             log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
                 item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
         }
@@ -1146,7 +1152,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         }
         if oldNode == "" {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-            prefetchCount++
+            prefetchASNs++
             log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
                 item.target, item.bestNode, group, item.weightType, item.bestWeight)
             continue
@@ -1154,21 +1160,21 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
         if oldNode == item.bestNode {
             if int(item.bestWeight*100) != int(oldWeight*100) {
                 s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-                prefetchCount++
+                prefetchASNs++
                 log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
                     item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
             }
         } else if int(item.bestWeight*100) > int(oldWeight*100) {
             s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
-            prefetchCount++
+            prefetchASNs++
             log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
                 item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
         }
     }
 
-    log.Infoln("[SmartStore] Prefetch completed for group [%s]: pre-calculated %d domain/ASN mappings",
-        group, prefetchCount)
-    return prefetchCount
+    log.Infoln("[SmartStore] Prefetch completed for group [%s]: pre-calculated [%d] domains, [%d] ASNs",
+        group, prefetchDomains, prefetchASNs)
+    return prefetchDomains + prefetchASNs
 }
 
 // GetNodeStates 获取节点状态

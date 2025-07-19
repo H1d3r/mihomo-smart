@@ -456,7 +456,7 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
 
     ranking, _ := s.GetNodeWeightRanking(group, config, true, proxies)
 
-    domains, err := s.GetActiveDomains(group, config, domainLimit, false)
+    domains := s.GetActiveDomains(group, config, domainLimit, false)
 
     log.Infoln("[SmartStore] Preloaded data for group [%s]: %d domains, %d node stats, %d prefetch results, %d node rankings, completed in %.2f seconds", 
         group, len(domains), nodeStatesCount, prefetchCount, len(ranking), time.Since(start).Seconds())
