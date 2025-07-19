@@ -7,13 +7,13 @@ import (
 
 // 计算权重
 func CalculateWeight(success, failure, connectTime, latency int64, isUDP bool, uploadTotal, downloadTotal, connectionDuration float64, lastConnectTimestamp int64) float64 {
-    // 1. 检查样本是否足够
+    // 1. 检查样本数量
     total := success + failure
     if total < DefaultMinSampleCount {
         return 0
     }
     
-    // 2. 基础数据准备并分析场景
+    // 2. 数据准备
     uploadMB := uploadTotal / (1024 * 1024)
     downloadMB := downloadTotal / (1024 * 1024)
     durationMinutes := connectionDuration / 60000

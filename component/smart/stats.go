@@ -963,8 +963,11 @@ func (s *Store) GetActiveASNs(group, config string, limit int, all bool) map[str
             if json.Unmarshal(data, &record) != nil {
                 continue
             }
-            for weightType := range record.Weights {
-                if strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN) {
+            if record.Weights == nil {
+                continue
+            }
+            for weightType, weight := range record.Weights {
+                if (strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN)) && weight > 0 {
                     parts := strings.Split(weightType, ":")
                     if len(parts) >= 2 {
                         asn := parts[1]
