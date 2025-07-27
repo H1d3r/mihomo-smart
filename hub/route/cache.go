@@ -15,6 +15,7 @@ func cacheRouter() http.Handler {
 	r.Post("/fakeip/flush", flushFakeIPPool)
 	r.Post("/smart/flush", flushAllSmartCache)
 	r.Post("/smart/flush/{config}", flushSmartConfigCache)
+	r.Post("/dns/flush", flushDnsCache)
 	return r
 }
 
@@ -79,6 +80,9 @@ func flushSmartConfigCache(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, newError(err.Error()))
 		return
 	}
-	
+}
+
+func flushDnsCache(w http.ResponseWriter, r *http.Request) {
+	resolver.ClearCache()
 	render.NoContent(w, r)
 }
