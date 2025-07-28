@@ -89,21 +89,7 @@ var (
     cachedMemoryLimit float64
     memoryLimitOnce   sync.Once
 
-    opMapPool = sync.Pool{
-        New: func() interface{} {
-            return make(map[string][]byte, 64)
-        },
-    }
-    
-    cacheUpdatePool = sync.Pool{
-        New: func() interface{} {
-            return make(map[string]interface{}, 64)
-        },
-    }
-
     domainResultCache *lru.LruCache[string, string]
-
-    StatsCache *lru.LruCache[string, *StatsRecord]
 )
 
 type (

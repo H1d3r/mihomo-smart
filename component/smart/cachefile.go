@@ -17,6 +17,20 @@ import (
     "github.com/metacubex/mihomo/log"
 )
 
+var (
+    opMapPool = sync.Pool{
+        New: func() interface{} {
+            return make(map[string][]byte, 64)
+        },
+    }
+    
+    cacheUpdatePool = sync.Pool{
+        New: func() interface{} {
+            return make(map[string]interface{}, 64)
+        },
+    }
+)
+
 type Store struct {
     db                  *bbolt.DB
     networkFailureStatus map[string]bool

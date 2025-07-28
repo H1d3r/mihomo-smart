@@ -14,7 +14,7 @@ func InitializeCache() {
     globalCacheParams.mutex.Lock()
     defer globalCacheParams.mutex.Unlock()
     
-    if dataCache != nil && domainResultCache != nil && StatsCache != nil {
+    if dataCache != nil && domainResultCache != nil {
         return
     }
     
@@ -30,13 +30,8 @@ func InitializeCache() {
     )
     
     domainResultCache = lru.New[string, string](
-        lru.WithSize[string, string](globalCacheParams.CacheMaxSize),
+        lru.WithSize[string, string](globalCacheParams.MaxDomains),
         lru.WithAge[string, string](CacheMaxAge),
-    )
-
-    StatsCache = lru.New[string, *StatsRecord](
-        lru.WithSize[string, *StatsRecord](globalCacheParams.CacheMaxSize),
-        lru.WithAge[string, *StatsRecord](CacheMaxAge),
     )
 }
 
@@ -317,6 +312,7 @@ func (s *Store) AdjustCacheParameters() {
         globalCacheParams.PrefetchLimit = MinPrefetchDomainsLimit
         
         newCacheSize = MinCacheSizeLimit/2
+        newDomainSize := MinDomainsLimit/2
         cacheMaxAge = CacheMaxAge/2
     } else {
         adjustFactor := 4 * memoryUsage * (1 - memoryUsage)
@@ -345,6 +341,7 @@ func (s *Store) AdjustCacheParameters() {
             globalCacheParams.BatchSaveThreshold, globalCacheParams.PrefetchLimit)
         
         newCacheSize = globalCacheParams.CacheMaxSize
+        newDomainSize := globalCacheParams.MaxDomains
     }
     
     globalCacheParams.mutex.Unlock()
@@ -355,13 +352,8 @@ func (s *Store) AdjustCacheParameters() {
     )
     
     newDomainResultCache := lru.New[string, string](
-        lru.WithSize[string, string](newCacheSize),
+        lru.WithSize[string, string](newDomainSize),
         lru.WithAge[string, string](cacheMaxAge),
-    )
-    
-    newStatsCache := lru.New[string, *StatsRecord](
-        lru.WithSize[string, *StatsRecord](newCacheSize),
-        lru.WithAge[string, *StatsRecord](cacheMaxAge),
     )
 
     var entries map[string]interface{}
@@ -422,7 +414,6 @@ func (s *Store) AdjustCacheParameters() {
     globalCacheLock.Lock()
     dataCache = newDataCache
     domainResultCache = newDomainResultCache
-    StatsCache = newStatsCache
     globalCacheLock.Unlock()
     
     globalQueueMutex.RLock()
@@ -467,9 +458,6 @@ func ClearCacheByLevel(level string, config string, group string) {
     if level == "all" {
         RemoveCacheValuesByPrefix("")
         globalCacheLock.Lock()
-        if StatsCache != nil {
-            StatsCache.Clear()
-        }
         if domainResultCache != nil {
             domainResultCache.Clear()
         }
@@ -481,12 +469,6 @@ func ClearCacheByLevel(level string, config string, group string) {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeStats, config, "", ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeRanking, config, "", ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypePrefetch, config, "", ""))
-        
-        globalCacheLock.Lock()
-        if StatsCache != nil {
-            StatsCache.RemoveByKeyPrefix(":" + config + ":")
-        }
-        globalCacheLock.Unlock()
     } else if level == "group" {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeUnwrap, config, group, ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeFailed, config, group, ""))
@@ -494,12 +476,6 @@ func ClearCacheByLevel(level string, config string, group string) {
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeStats, config, group, ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypeRanking, config, group, ""))
         RemoveCacheValuesByPrefix(FormatCacheKey(KeyTypePrefetch, config, group, ""))
-        
-        globalCacheLock.Lock()
-        if StatsCache != nil {
-            StatsCache.RemoveByKeyPrefix(":" + config + ":" + group + ":")
-        }
-        globalCacheLock.Unlock()
     }
 }
 
