@@ -1051,7 +1051,7 @@ func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metada
     domain, proxyName string, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64,
     connectionDuration int64, asnInfo string, isModelPredicted bool) {
     
-        var tcpAsnWeight, udpAsnWeight float64
+    var tcpAsnWeight, udpAsnWeight float64
     var asnDisplayInfo string
 
     if asnInfo != "" {
@@ -1075,17 +1075,12 @@ func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metada
         weightSource = "LightGBM"
     }
 
-    displayAddress := metadata.Host
-    if displayAddress == "" {
-        displayAddress = domain
-    }
-
     log.Debugln("[Smart] Updated weights: (Model: [%s], TCP: [%.4f], UDP: [%.4f], TCP ASN: [%.4f], UDP ASN: [%.4f], Base: [%.4f], Priority: [%.2f]) "+
         "For (Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] - ASN: [%s]) "+
         "- Current: (Up: [%.2f MB], Down: [%.2f MB], Max Up Speed: [%.2f KB/s], Max Down Speed: [%.2f KB/s], Duration: [%.2f s]) "+
         "- History: (Success: [%d], Failure: [%d], Connect: [%d ms], Latency: [%d ms], Total Up: [%.2f MB], Total Down: [%.2f MB], Max Up Speed: [%.2f KB/s], Max Down Speed: [%.2f KB/s], Avg Duration: [%.2f min])",
         weightSource, record.Weights[smart.WeightTypeTCP], record.Weights[smart.WeightTypeUDP], tcpAsnWeight, udpAsnWeight, baseWeight, priorityFactor,
-        s.Name(), proxyName, strings.ToUpper(metadata.NetWork.String()), displayAddress, asnDisplayInfo,
+        s.Name(), proxyName, strings.ToUpper(metadata.NetWork.String()), domain, asnDisplayInfo,
         uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, float64(connectionDuration)/1000.0,
         record.Success, record.Failure, record.ConnectTime, record.Latency,
         record.UploadTotal, record.DownloadTotal, record.MaxUploadRate, record.MaxDownloadRate, record.ConnectionDuration)
@@ -1240,19 +1235,20 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
         if !fromLongConnProcess {
             atomicRecord.Add("uploadTotal", uploadTotalMB)
             atomicRecord.Add("downloadTotal", downloadTotalMB)
-            oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
-            if maxUploadRateKB > oldMaxUploadRate {
-                atomicRecord.Set("maxUploadRate", maxUploadRateKB)
-            }
-
-            oldMaxDownloadRate := atomicRecord.Get("maxDownloadRate").(float64)
-            if maxDownloadRateKB > oldMaxDownloadRate {
-                atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
-            }
 
             if connectionDuration > 0 {
                 s.updateConnectionDuration(atomicRecord, connectionDuration)
             }
+        }
+
+        oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
+        if maxUploadRateKB > oldMaxUploadRate {
+            atomicRecord.Set("maxUploadRate", maxUploadRateKB)
+        }
+
+        oldMaxDownloadRate := atomicRecord.Get("maxDownloadRate").(float64)
+        if maxDownloadRateKB > oldMaxDownloadRate {
+            atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
         }
 
         success := atomicRecord.Get("success").(int64)
