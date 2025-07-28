@@ -14,7 +14,6 @@ import (
     "github.com/metacubex/mihomo/common/cmd"
     "github.com/metacubex/mihomo/common/lru"
     "github.com/metacubex/mihomo/log"
-    "golang.org/x/net/publicsuffix"
 )
 
 const (
@@ -192,8 +191,6 @@ func GetEffectiveDomain(host string, dstIP string) string {
 
         if ip := net.ParseIP(host); ip != nil {
             result = ip.String()
-        } else if eTLD, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil && eTLD != "" && eTLD != host {
-            result = eTLD
         } else {
             result = host
         }
