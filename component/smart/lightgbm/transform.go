@@ -17,6 +17,27 @@ import (
 // [order]
 // 0=success
 // 1=failure
+// 2=connect_time
+// 3=latency
+// 4=upload_mb
+// 5=download_mb
+// 6=maxuploadrate_kb
+// 7=maxdownloadrate_kb
+// 8=duration_minutes
+// 9=last_used_seconds
+// 10=is_udp
+// 11=is_tcp
+// 12=asn_feature
+// 13=country_feature
+// 14=address_feature
+// 15=port_feature
+// 16=traffic_ratio
+// 17=traffic_density
+// 18=connection_type_feature
+// 19=asn_hash
+// 20=host_hash
+// 21=ip_hash
+// 22=geoip_hash
 // ... (index=feature_name, one per line, up to MaxFeatureSize)
 // [/order]
 //
@@ -354,8 +375,8 @@ func getDefaultFeatureOrder() map[int]string {
         3:  "latency",
         4:  "upload_mb",
         5:  "download_mb",
-        6:  "max_upload_rate_kb",
-        7:  "max_download_rate_kb",
+        6:  "maxuploadrate_kb",
+        7:  "maxdownloadrate_kb",
         8:  "duration_minutes",
         9:  "last_used_seconds",
         10: "is_udp",

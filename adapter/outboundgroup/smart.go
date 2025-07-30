@@ -968,8 +968,9 @@ func (s *Smart) checkAndLimitStats(record *smart.AtomicStatsRecord) {
 }
 
 // 记录保存
-func (s *Smart) saveStatsRecord(cacheKey, domain string, proxy C.Proxy, record *smart.StatsRecord) {
+func (s *Smart) saveStatsRecord(cacheKey, domain string, proxy C.Proxy, record *smart.StatsRecord, lastUsed time.Time) {
     smart.SetCacheValue(cacheKey, record)
+    record.LastUsed = lastUsed
 
     go func() {
         if data, err := json.Marshal(record); err == nil {
@@ -1191,14 +1192,13 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
             newLatency := updateAverageValue(oldLatency, latency, success)
             atomicRecord.Set("latency", newLatency)
         }
-        atomicRecord.Set("lastUsed", time.Now().Unix())
     case "failed":
         atomicRecord.Add("failure", int64(1))
-        atomicRecord.Set("lastUsed", time.Now().Unix())
         success := atomicRecord.Get("success").(int64)
         failure := atomicRecord.Get("failure").(int64)
         connectTimeVal := atomicRecord.Get("connectTime").(int64)
         latencyVal := atomicRecord.Get("latency").(int64)
+        lastUsedVal := atomicRecord.Get("lastUsed").(int64)
 
         if s.useLightGBM && s.weightModel != nil {
             input := lightgbm.CreateModelInputFromStats(
@@ -1211,13 +1211,13 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
             } else {
                 calculatedWeight = smart.CalculateWeight(
                     success, failure, connectTimeVal, latencyVal,
-                    metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, time.Now().Unix()) * priorityFactor
+                    metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, lastUsedVal) * priorityFactor
                 isModelPredicted = false
             }
         } else {
             calculatedWeight = smart.CalculateWeight(
                 success, failure, connectTimeVal, latencyVal,
-                metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, time.Now().Unix()) * priorityFactor
+                metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, lastUsedVal) * priorityFactor
             isModelPredicted = false
         }
 
@@ -1258,6 +1258,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
         connectTimeVal := atomicRecord.Get("connectTime").(int64)
         latencyVal := atomicRecord.Get("latency").(int64)
         durationVal := atomicRecord.Get("duration").(float64)
+        lastUsedVal := atomicRecord.Get("lastUsed").(int64)
 
         if s.useLightGBM && s.weightModel != nil {
             tempRecord := atomicRecord.CreateStatsSnapshot()
@@ -1267,13 +1268,13 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
             } else {
                 calculatedWeight = smart.CalculateWeight(
                     success, failure, connectTimeVal, latencyVal,
-                    metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, time.Now().Unix()) * priorityFactor
+                    metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, lastUsedVal) * priorityFactor
                 isModelPredicted = false
             }
         } else {
             calculatedWeight = smart.CalculateWeight(
                 success, failure, connectTimeVal, latencyVal,
-                metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, time.Now().Unix()) * priorityFactor
+                metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, lastUsedVal) * priorityFactor
             isModelPredicted = false
         }
 
@@ -1284,8 +1285,6 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
         if asnInfo != "" {
             s.updateAsnWeights(atomicRecord, asnInfo, calculatedWeight, metadata.NetWork == C.UDP)
         }
-
-        atomicRecord.Set("lastUsed", time.Now().Unix())
 
         if oldWeight > 0 && calculatedWeight > 0 {
             needCheckQuality = true
@@ -1322,8 +1321,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
     }
 
     statsSnapshot := atomicRecord.CreateStatsSnapshot()
-    s.saveStatsRecord(cacheKey, domain, proxy, statsSnapshot)
-
+    
     if isDegraded {
         go s.cleanupDegradedNodePreferenceCache(domain, proxy.Name(), calculatedWeight, weightType, asnInfo)
     }
@@ -1340,6 +1338,9 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
     if needDataCollection {
         s.collectConnectionData(status, statsSnapshot, metadata, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, baseWeight, proxy.Name(), isModelPredicted)
     }
+
+    // 保存统计记录
+    s.saveStatsRecord(cacheKey, domain, proxy, statsSnapshot, time.Now())
 }
 
 func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
