@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/common/queue"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/xsync"
+	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -336,6 +337,7 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
         return 0, false, err
     }
     req = req.WithContext(ctx)
+    req.Header.Set("User-Agent", convert.RandUserAgent())
 
     transport := &http.Transport{
         DialContext: func(context.Context, string, string) (net.Conn, error) {
