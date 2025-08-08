@@ -818,7 +818,7 @@ func (s *Smart) fallbackToRoundRobin(metadata *C.Metadata, proxies []C.Proxy) C.
 	}
 
 	if s.fallback != nil {
-		proxy := s.fallback.Unwrap(metadata, false)
+		proxy := s.fallback.Unwrap(metadata, true)
 		if proxy != nil {
 			return proxy
 		}
