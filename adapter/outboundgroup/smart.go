@@ -1179,11 +1179,28 @@ func formatTrafficUnit(val float64, isSpeed bool) string {
     return fmt.Sprintf("%.2f %s", val, units[i])
 }
 
+func formatTimeUnit(val float64) string {
+    units := []string{"ms", "s", "min", "h"}
+    base := 1000.0
+    i := 0
+    for val >= base && i < len(units)-1 {
+        if i == 0 {
+            val /= base
+        } else if i == 1 {
+            val /= 60
+        } else if i == 2 {
+            val /= 60
+        }
+        i++
+    }
+    return fmt.Sprintf("%.2f %s", val, units[i])
+}
+
 // 日志记录
 func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metadata, baseWeight, priorityFactor float64,
     domain, proxyName string, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64,
     connectionDuration int64, asnInfo string, isModelPredicted bool) {
-    
+
     var tcpAsnWeight, udpAsnWeight float64
     var asnDisplayInfo string
 
@@ -1210,21 +1227,24 @@ func (s *Smart) logConnectionStats(record *smart.StatsRecord, metadata *C.Metada
 
     log.Debugln("[Smart] Updated weights: (Model: [%s], TCP: [%.4f], UDP: [%.4f], TCP ASN: [%.4f], UDP ASN: [%.4f], Base: [%.4f], Priority: [%.2f]) "+
         "For (Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] - ASN: [%s]) "+
-        "- Current: (Up: [%s], Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Duration: [%.2f s]) "+
-        "- History: (Success: [%d], Failure: [%d], Connect: [%d ms], Latency: [%d ms], Total Up: [%s], Total Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Avg Duration: [%.2f min])",
+        "- Current: (Up: [%s], Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Duration: [%s]) "+
+        "- History: (Success: [%d], Failure: [%d], Connect: [%s], Latency: [%s], Total Up: [%s], Total Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Avg Duration: [%s])",
         weightSource, record.Weights[smart.WeightTypeTCP], record.Weights[smart.WeightTypeUDP], tcpAsnWeight, udpAsnWeight, baseWeight, priorityFactor,
         s.Name(), proxyName, strings.ToUpper(metadata.NetWork.String()), domain, asnDisplayInfo,
         formatTrafficUnit(uploadTotal*1024*1024, false),
         formatTrafficUnit(downloadTotal*1024*1024, false),
         formatTrafficUnit(maxUploadRate*1024, true),
         formatTrafficUnit(maxDownloadRate*1024, true),
-        float64(connectionDuration)/1000.0,
-        record.Success, record.Failure, record.ConnectTime, record.Latency,
+        formatTimeUnit(float64(connectionDuration)),
+        record.Success, record.Failure,
+        formatTimeUnit(float64(record.ConnectTime)),
+        formatTimeUnit(float64(record.Latency)),
         formatTrafficUnit(record.UploadTotal*1024*1024, false),
         formatTrafficUnit(record.DownloadTotal*1024*1024, false),
         formatTrafficUnit(record.MaxUploadRate*1024, true),
         formatTrafficUnit(record.MaxDownloadRate*1024, true),
-        record.ConnectionDuration)
+        formatTimeUnit(record.ConnectionDuration*60000),
+    )
 }
 
 // 数据收集
