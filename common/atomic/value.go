@@ -115,7 +115,6 @@ func CloneMap[K comparable, V any](m map[K]V) map[K]V {
 
 // atomic.Float64
 type Float64 struct {
-	_     uint64
 	value uint64
 }
 

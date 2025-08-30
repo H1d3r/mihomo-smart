@@ -30,11 +30,11 @@ type AtomicStatsRecord struct {
 	status      atomic.Int64
 
 	weights         atomic.TypedValue[map[string]float64]
-	uploadTotal     atomic.Float64
-	downloadTotal   atomic.Float64
-	duration        atomic.Float64
-	maxUploadRate   atomic.Float64
-	maxDownloadRate atomic.Float64
+	uploadTotal     *atomic.Float64
+    downloadTotal   *atomic.Float64
+    duration        *atomic.Float64
+    maxUploadRate   *atomic.Float64
+    maxDownloadRate *atomic.Float64
 }
 
 type AtomicRecordManager struct {
@@ -96,7 +96,13 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 		return value.(*AtomicStatsRecord)
 	}
 
-	record := &AtomicStatsRecord{}
+	record := &AtomicStatsRecord{
+		uploadTotal:     new(atomic.Float64),
+		downloadTotal:   new(atomic.Float64),
+		duration:        new(atomic.Float64),
+		maxUploadRate:   new(atomic.Float64),
+		maxDownloadRate: new(atomic.Float64),
+	}
 	record.weights.Store(make(map[string]float64))
 	record.lastUsed.Store(time.Now().Unix())
 	record.status.Store(0)
@@ -128,7 +134,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 	}
 
 	return record
-}
+	}
 
 // 创建统计快照
 func (record *AtomicStatsRecord) CreateStatsSnapshot() *StatsRecord {
