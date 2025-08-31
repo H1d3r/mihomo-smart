@@ -330,12 +330,9 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return p.DialContext(ctx, &addr)
 		},
-		DisableKeepAlives:     true,
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
-		MaxIdleConns:          0,
-		MaxIdleConnsPerHost:   0,
-		IdleConnTimeout:       5 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
@@ -355,14 +352,31 @@ func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils
 		return 0, false, err
 	}
 	req = req.WithContext(ctx)
-	req.Close = true
-	req.Header.Set("Connection", "close")
 	req.Header.Set("User-Agent", convert.RandUserAgent())
+	req.Header.Set("Accept", "application/json, text/html, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, false, err
 	}
+
+	if resp != nil && resp.StatusCode == http.StatusForbidden && req.Method == http.MethodHead {
+		_ = resp.Body.Close()
+		getReq, err2 := http.NewRequest(http.MethodGet, url, nil)
+		if err2 != nil {
+			return 0, false, err2
+		}
+		getReq = getReq.WithContext(ctx)
+		getReq.Header = req.Header.Clone()
+
+		resp, err = client.Do(getReq)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+
 	defer resp.Body.Close()
 
 	status = uint16(resp.StatusCode)
