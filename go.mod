@@ -14,7 +14,7 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20250109001534-8abf58130905
 	github.com/klauspost/compress v1.17.9 // lastest version compatible with golang1.20
 	github.com/mdlayher/netlink v1.7.2
-	github.com/metacubex/amneziawg-go v0.0.0-20250820070344-732c0c9d418a
+	github.com/metacubex/amneziawg-go v0.0.0-20250902133113-a7f637c14281
 	github.com/metacubex/bart v0.20.5
 	github.com/metacubex/bbolt v0.0.0-20250725135710-010dbbbb7a5b
 	github.com/metacubex/blake3 v0.1.0
@@ -24,7 +24,7 @@ require (
 	github.com/metacubex/quic-go v0.54.1-0.20250730114134-a1ae705fe295
 	github.com/metacubex/randv2 v0.2.0
 	github.com/metacubex/restls-client-go v0.1.7
-	github.com/metacubex/sing v0.5.6-0.20250826072929-f69b475e017b
+	github.com/metacubex/sing v0.5.6-0.20250903022707-c9bf6d825f4d
 	github.com/metacubex/sing-mux v0.3.3-0.20250813083925-d7c9aeaeeaac
 	github.com/metacubex/sing-quic v0.0.0-20250718154553-1b193bec4cbb
 	github.com/metacubex/sing-shadowsocks v0.2.12
