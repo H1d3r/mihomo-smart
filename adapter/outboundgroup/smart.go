@@ -365,13 +365,7 @@ func (s *Smart) Set(name string) error {
 		return errors.New("proxy not exist")
 	}
 
-	s.selected = name
-	if !p.AliveForTestUrl(s.testUrl) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(5000))
-		defer cancel()
-		expectedStatus, _ := utils.NewUnsignedRanges[uint16](s.expectedStatus)
-		_, _ = p.URLTest(ctx, s.testUrl, expectedStatus)
-	}
+	s.ForceSet(name)
 
 	return nil
 }
