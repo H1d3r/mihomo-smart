@@ -58,6 +58,7 @@ var (
 	flushQueueOnce       atomic.Bool
 	smartInitOnce        sync.Once
 	preloadOnce          sync.Once
+	asnAvailable         bool
 )
 
 type smartOption func(*Smart)
@@ -83,17 +84,14 @@ type Smart struct {
 	weightModel    *lightgbm.WeightModel
 	strategy       string
 	sampleRate     float64
-	asnAvailable   bool
 }
 
-type (
-	priorityRule struct {
-		pattern string
-		regex   *regexp2.Regexp
-		factor  float64
-		isRegex bool
-	}
-)
+type priorityRule struct {
+	pattern string
+	regex   *regexp2.Regexp
+	factor  float64
+	isRegex bool
+}
 
 func getConfigFilename() string {
 	configFile := C.Path.Config()
@@ -430,8 +428,7 @@ func (s *Smart) InitializeCache() {
 		s.startTimedTask(5*time.Minute, flushQueueInterval, "Queue flush", func() {
 			s.store.FlushQueue(false)
 		}, false)
-		// Check ASN database availability
-		s.asnAvailable = mmdb.Verify(C.Path.ASN())
+		asnAvailable = mmdb.Verify(C.Path.ASN())
 	})
 
 	s.startTimedTask(5*time.Minute, checkInterval, "Clean up nodes", s.cleanupOrphanedNodeCache, true)
@@ -1959,7 +1956,7 @@ func (s *Smart) getASNCode(metadata *C.Metadata) string {
 	}
 
 	if metadata.DstIPASN == "" {
-		if !s.asnAvailable {
+		if !asnAvailable {
 			return ""
 		}
 		asn, aso := mmdb.ASNInstance().LookupASN(metadata.DstIP.AsSlice())

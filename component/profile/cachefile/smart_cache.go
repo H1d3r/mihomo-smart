@@ -22,17 +22,15 @@ func NewSmartStore(cache *CacheFile) *SmartStore {
 		return nil
 	}
 
-	err := cache.DB.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(bucketSmartStats)
-		return err
-	})
-
-	if err != nil {
-		log.Warnln("[SmartStore] Failed to create bucket: %v", err)
-		return nil
-	}
-
 	smartInitOnce.Do(func() {
+		err := cache.DB.Update(func(tx *bbolt.Tx) error {
+			_, err := tx.CreateBucketIfNotExists(bucketSmartStats)
+			return err
+		})
+		if err != nil {
+			log.Warnln("[SmartStore] Failed to create bucket: %v", err)
+			return
+		}
 		smart.InitializeGlobalParams()
 		smartStore = smart.NewStore(cache.DB)
 	})
