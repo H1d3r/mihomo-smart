@@ -181,9 +181,8 @@ func GetEffectiveDomain(host string, dstIP string) (string, string) {
 
 	compute := func() string {
 		parts := strings.Split(h, ".")
-
-		reg, err := publicsuffix.EffectiveTLDPlusOne(h)
-		if err != nil || reg == "" || !(h == reg || strings.HasSuffix(h, "."+reg)) {
+		reg, err := publicsuffix.EffectiveTLDPlusOne(h)	
+		if err != nil || reg == "" || reg == h || !(h == reg || strings.HasSuffix(h, "."+reg)) {
 			if len(parts) >= 2 {
 				reg = strings.Join(parts[len(parts)-2:], ".")
 			} else {
