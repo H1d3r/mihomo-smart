@@ -200,7 +200,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 							break
 						}
 						proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-						if proxy == nil {
+						if triedProxies[proxy.Name()] {
 							break
 						}
 						triedProxies[proxy.Name()] = true
@@ -221,7 +221,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				break
 			}
 			proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-			if proxy == nil {
+			if triedProxies[proxy.Name()] {
 				break
 			}
 			triedProxies[proxy.Name()] = true
@@ -301,7 +301,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 			break
 		}
 		proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-		if proxy == nil {
+		if triedProxies[proxy.Name()] {
 			break
 		}
 	}
@@ -790,7 +790,7 @@ func (s *Smart) selectNextProxy(metadata *C.Metadata, availableProxies []C.Proxy
 				return p
 			}
 		}
-		return nil
+		return availableProxies[0]
 	}
 
 	weightType := smart.WeightTypeTCP
@@ -845,7 +845,7 @@ func (s *Smart) selectNextProxy(metadata *C.Metadata, availableProxies []C.Proxy
 		}
 	}
 
-	return nil
+	return availableProxies[0]
 }
 
 func (s *Smart) fallbackToLoadBalance(metadata *C.Metadata, proxies []C.Proxy) C.Proxy {
