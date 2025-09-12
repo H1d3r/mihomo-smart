@@ -243,7 +243,7 @@ func (s *Smart) dialContext(ctx context.Context, proxy C.Proxy, metadata *C.Meta
 			}
 		}
 	}
-	s.recordConnectionStats("success", metadata, proxy, time.Since(start).Milliseconds(), 0, 0, 0, 0, 0, 0, false, nil)
+	s.recordConnectionStats("connected", metadata, proxy, time.Since(start).Milliseconds(), 0, 0, 0, 0, 0, 0, false, nil)
 	return c, nil
 }
 
@@ -1580,6 +1580,13 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	var isModelPredicted bool
 
 	switch status {
+	case "connected":
+		if connectTime > 0 {
+			success := atomicRecord.Get("success").(int64)
+			oldConnectTime := atomicRecord.Get("connectTime").(int64)
+			newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
+			atomicRecord.Set("connectTime", newConnectTime)
+		}
 	case "success":
 		atomicRecord.Add("success", int64(1))
 
