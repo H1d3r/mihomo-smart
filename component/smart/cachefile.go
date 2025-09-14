@@ -49,6 +49,80 @@ type Store struct {
 	}
 }
 
+func appendToGlobalQueue(operations ...StoreOperation) {
+	globalOperationQueue.Update(func(old []StoreOperation) []StoreOperation {
+		newQueue := make([]StoreOperation, len(old)+len(operations))
+		copy(newQueue, old)
+		copy(newQueue[len(old):], operations)
+		return newQueue
+	})
+}
+
+func replaceGlobalQueue(newQueue []StoreOperation) {
+	globalOperationQueue.Store(newQueue)
+}
+
+func getGlobalQueueSnapshot() []StoreOperation {
+	return globalOperationQueue.Load()
+}
+
+func swapGlobalQueue(newQueue []StoreOperation) []StoreOperation {
+	return globalOperationQueue.Swap(newQueue)
+}
+
+func updateGlobalQueue(updateFunc func([]StoreOperation) []StoreOperation) {
+	globalOperationQueue.Update(updateFunc)
+}
+
+func removeFromGlobalQueue(shouldRemove func(StoreOperation) bool) {
+	updateGlobalQueue(func(currentQueue []StoreOperation) []StoreOperation {
+		newQueue := make([]StoreOperation, 0, len(currentQueue))
+		for _, op := range currentQueue {
+			if !shouldRemove(op) {
+				newQueue = append(newQueue, op)
+			}
+		}
+		return newQueue
+	})
+}
+
+func filterQueueByConfig(config string) {
+	updateGlobalQueue(func(currentQueue []StoreOperation) []StoreOperation {
+		newQueue := make([]StoreOperation, 0, len(currentQueue))
+		for _, op := range currentQueue {
+			if op.Config != config {
+				newQueue = append(newQueue, op)
+			}
+		}
+		return newQueue
+	})
+}
+
+func filterQueueByGroup(group, config string) {
+	updateGlobalQueue(func(currentQueue []StoreOperation) []StoreOperation {
+		newQueue := make([]StoreOperation, 0, len(currentQueue))
+		for _, op := range currentQueue {
+			if !(op.Group == group && op.Config == config) {
+				newQueue = append(newQueue, op)
+			}
+		}
+		return newQueue
+	})
+}
+
+func removeNodesFromQueue(group, config string, nodes []string) {
+	removeFromGlobalQueue(func(op StoreOperation) bool {
+		if op.Group == group && op.Config == config {
+			for _, node := range nodes {
+				if op.Node == node {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
 func NewStore(db *bbolt.DB) *Store {
 	s := &Store{
 		db: db,
@@ -61,12 +135,9 @@ func NewStore(db *bbolt.DB) *Store {
 	s.networkFailureManager.cacheThrottle.lastSet = make(map[string]time.Time)
 	s.networkFailureManager.cacheThrottle.lastClear = make(map[string]time.Time)
 
-	globalQueueMutex.Lock()
-	if globalOperationQueue == nil {
-		threshold := GetBatchSaveThreshold()
-		globalOperationQueue = make([]StoreOperation, 0, threshold)
-	}
-	globalQueueMutex.Unlock()
+	threshold := GetBatchSaveThreshold()
+	emptyQueue := make([]StoreOperation, 0, threshold)
+	replaceGlobalQueue(emptyQueue)
 
 	return s
 }
@@ -144,7 +215,7 @@ func (s *Store) BatchSave(operations []StoreOperation) error {
 						}
 					case OpSavePrefetch:
 						cacheKey = FormatCacheKey(KeyTypePrefetch, op.Config, op.Group, op.Domain)
-						var prefetchMap map[string]interface{}
+						var prefetchMap PrefetchMap
 						if json.Unmarshal(op.Data, &prefetchMap) == nil {
 							cacheUpdatesSync.Store(cacheKey, prefetchMap)
 						}
@@ -208,87 +279,79 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
 		return nil
 	}
 
-	globalQueueMutex.RLock()
-	existingOps := make([]StoreOperation, len(globalOperationQueue))
-	copy(existingOps, globalOperationQueue)
-	globalQueueMutex.RUnlock()
+	existingOps := getGlobalQueueSnapshot()
 
 	initialMapSize := len(existingOps) + len(operations)
 	opMap := make(map[string]*StoreOperation, initialMapSize)
 	lookupToKeys := make(map[string][]string, initialMapSize/2)
 	cacheBatch := sync.Map{}
 
-	for i, op := range existingOps {
-		var opKey string
-		var lookupKey string
-
-		if op.Type == OpSaveStats {
-			lookupKey = fmt.Sprintf("%s:%s:%s:%s", op.Group, op.Config, op.Domain, op.Node)
-			opKey = fmt.Sprintf("%s:%d", lookupKey, i)
-		} else {
-			lookupKey = fmt.Sprintf("%d:%s:%s:%s:%s", op.Type, op.Group, op.Config, op.Domain, op.Node)
-			opKey = fmt.Sprintf("%s:%d", lookupKey, i)
-		}
-
-		opMap[opKey] = &existingOps[i]
-	}
-
-	for opKey, op := range opMap {
+	for i := range existingOps {
+		op := &existingOps[i]
 		var lookupKey string
 		if op.Type == OpSaveStats {
 			lookupKey = fmt.Sprintf("%s:%s:%s:%s", op.Group, op.Config, op.Domain, op.Node)
 		} else {
 			lookupKey = fmt.Sprintf("%d:%s:%s:%s:%s", op.Type, op.Group, op.Config, op.Domain, op.Node)
 		}
+		opKey := fmt.Sprintf("%s:%d", lookupKey, i)
+		opMap[opKey] = op
 		lookupToKeys[lookupKey] = append(lookupToKeys[lookupKey], opKey)
 	}
 
 	concurrency := 2
 	batchSize := 100
+	b, _ := batch.New[struct{}](context.Background(), batch.WithConcurrencyNum[struct{}](concurrency))
+	processGroup := singleflight.Group[struct{}]{}
+	var mu sync.Mutex
 
-	b, _ := batch.New[StoreOperation](context.Background(), batch.WithConcurrencyNum[StoreOperation](concurrency))
-	processGroup := singleflight.Group[StoreOperation]{}
-
-	for batchStart := 0; batchStart < len(operations); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-
-		if batchEnd > len(operations) {
-			batchEnd = len(operations)
+	numBatches := (len(operations) + batchSize - 1) / batchSize
+	for i := 0; i < numBatches; i++ {
+		start := i * batchSize
+		end := (i + 1) * batchSize
+		if end > len(operations) {
+			end = len(operations)
 		}
 
-		batchIndex := batchStart
-		b.Go(fmt.Sprintf("batch-%d", batchIndex/batchSize), func() (StoreOperation, error) {
-			start, end := batchIndex, batchEnd
-			for i := start; i < end; i++ {
-				op := operations[i]
+		batchOps := operations[start:end]
+		b.Go(fmt.Sprintf("batch-%d", i), func() (struct{}, error) {
+			for _, op := range batchOps {
 				var lookupKey string
 
 				if op.Type == OpSaveStats {
 					lookupKey = fmt.Sprintf("%s:%s:%s:%s", op.Group, op.Config, op.Domain, op.Node)
 
-					processGroup.Do(lookupKey, func() (StoreOperation, error) {
-						matchingKeys, found := lookupToKeys[lookupKey]
-						if !found || len(matchingKeys) == 0 {
+					processGroup.Do(lookupKey, func() (struct{}, error) {
+						var cacheKey string
+						var record *StatsRecord
+						if op.Data != nil {
+							cacheKey = FormatCacheKey(KeyTypeStats, op.Config, op.Group, op.Domain, op.Node)
+							var tempRecord StatsRecord
+							if json.Unmarshal(op.Data, &tempRecord) == nil {
+								record = &tempRecord
+							}
+						}
+
+						mu.Lock()
+						defer mu.Unlock()
+
+						matchingKeys := lookupToKeys[lookupKey]
+						if len(matchingKeys) == 0 {
 							newKey := fmt.Sprintf("%s:%d", lookupKey, len(opMap))
-							opMap[newKey] = &op
+							opCopy := op
+							opMap[newKey] = &opCopy
 							lookupToKeys[lookupKey] = append(lookupToKeys[lookupKey], newKey)
 
-							if op.Data != nil {
-								cacheKey := FormatCacheKey(KeyTypeStats, op.Config, op.Group, op.Domain, op.Node)
-								var record StatsRecord
-								if json.Unmarshal(op.Data, &record) == nil {
-									cacheBatch.Store(cacheKey, &record)
-								}
+							if record != nil {
+								cacheBatch.Store(cacheKey, record)
 							}
-							return op, nil
+							return struct{}{}, nil
 						}
 
 						existingOp := opMap[matchingKeys[0]]
-						var existingRecord, newRecord StatsRecord
+						var existingRecord StatsRecord
 
-						if json.Unmarshal(existingOp.Data, &existingRecord) == nil &&
-							json.Unmarshal(op.Data, &newRecord) == nil {
-
+						if json.Unmarshal(existingOp.Data, &existingRecord) == nil && record != nil {
 							oldWeights := make(map[string]float64, len(existingRecord.Weights))
 							if existingRecord.Weights != nil {
 								for k, v := range existingRecord.Weights {
@@ -296,7 +359,7 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
 								}
 							}
 
-							existingRecord = newRecord
+							existingRecord = *record
 
 							if existingRecord.Success > 1000000 {
 								existingRecord.Success = existingRecord.Success / 2
@@ -317,50 +380,55 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
 								}
 							}
 
-							mergedData, err := json.Marshal(existingRecord)
-							if err == nil {
+							if mergedData, err := json.Marshal(existingRecord); err == nil {
 								existingOp.Data = mergedData
-
-								cacheKey := FormatCacheKey(KeyTypeStats, op.Config, op.Group, op.Domain, op.Node)
 								cacheBatch.Store(cacheKey, &existingRecord)
 							}
 						}
 
-						return *existingOp, nil
+						return struct{}{}, nil
 					})
 				} else {
 					lookupKey = fmt.Sprintf("%d:%s:%s:%s:%s", op.Type, op.Group, op.Config, op.Domain, op.Node)
-
-					newKey := fmt.Sprintf("%s:%d", lookupKey, len(opMap))
-					opMap[newKey] = &op
-					lookupToKeys[lookupKey] = append(lookupToKeys[lookupKey], newKey)
-
+					
+					var cacheKey string
+					var cacheValue interface{}
 					if op.Data != nil {
-						var cacheKey string
 						switch op.Type {
 						case OpSaveNodeState:
 							cacheKey = FormatCacheKey(KeyTypeNode, op.Config, op.Group, op.Node)
 							var nodeState NodeState
 							if json.Unmarshal(op.Data, &nodeState) == nil {
-								cacheBatch.Store(cacheKey, nodeState)
+								cacheValue = nodeState
 							}
 						case OpSavePrefetch:
 							cacheKey = FormatCacheKey(KeyTypePrefetch, op.Config, op.Group, op.Domain)
-							var prefetchMap map[string]interface{}
+							var prefetchMap PrefetchMap
 							if json.Unmarshal(op.Data, &prefetchMap) == nil {
-								cacheBatch.Store(cacheKey, prefetchMap)
+								cacheValue = prefetchMap
 							}
 						case OpSaveRanking:
 							cacheKey = FormatCacheKey(KeyTypeRanking, op.Config, op.Group, "")
 							var rankingData RankingData
 							if json.Unmarshal(op.Data, &rankingData) == nil {
-								cacheBatch.Store(cacheKey, rankingData)
+								cacheValue = rankingData
 							}
 						}
 					}
+
+					mu.Lock()
+					newKey := fmt.Sprintf("%s:%d", lookupKey, len(opMap))
+					opCopy := op
+					opMap[newKey] = &opCopy
+					lookupToKeys[lookupKey] = append(lookupToKeys[lookupKey], newKey)
+					mu.Unlock()
+
+					if cacheValue != nil {
+						cacheBatch.Store(cacheKey, cacheValue)
+					}
 				}
 			}
-			return StoreOperation{}, nil
+			return struct{}{}, nil
 		})
 	}
 
@@ -372,15 +440,13 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
 		newQueue = append(newQueue, *op)
 	}
 
-	globalQueueMutex.Lock()
-	globalOperationQueue = newQueue
+	replaceGlobalQueue(newQueue)
 
 	globalCacheParams.mutex.RLock()
 	currentThreshold := globalCacheParams.BatchSaveThreshold
 	globalCacheParams.mutex.RUnlock()
 
-	needFlush := len(globalOperationQueue) >= currentThreshold
-	globalQueueMutex.Unlock()
+	needFlush := len(newQueue) >= currentThreshold
 
 	cacheUpdates := make(map[string]interface{}, len(opMap)/2)
 	cacheBatch.Range(func(key, value interface{}) bool {
@@ -403,12 +469,6 @@ func (s *Store) BatchSaveConnStats(operations []StoreOperation) error {
 
 // 刷新队列中的操作到数据库
 func (s *Store) FlushQueue(isThresholdTriggered bool) {
-	globalQueueMutex.Lock()
-	if len(globalOperationQueue) == 0 {
-		globalQueueMutex.Unlock()
-		return
-	}
-
 	threshold := MinBatchThreshLimit
 	globalCacheParams.mutex.RLock()
 	if globalCacheParams.BatchSaveThreshold > 0 {
@@ -416,19 +476,18 @@ func (s *Store) FlushQueue(isThresholdTriggered bool) {
 	}
 	globalCacheParams.mutex.RUnlock()
 
-	if len(globalOperationQueue) <= 100 {
-		ops := globalOperationQueue
-		globalOperationQueue = make([]StoreOperation, 0, threshold)
-		globalQueueMutex.Unlock()
+	emptyQueue := make([]StoreOperation, 0, threshold)
+	ops := swapGlobalQueue(emptyQueue)
 
+	if len(ops) == 0 {
+		return
+	}
+
+	if len(ops) <= 100 {
 		s.BatchSave(ops)
 		log.Debugln("[SmartStore] Queue datas saved, operations: [%d]", len(ops))
 		return
 	}
-
-	ops := globalOperationQueue
-	globalOperationQueue = make([]StoreOperation, 0, threshold)
-	globalQueueMutex.Unlock()
 
 	maxBatchSize := 100
 	totalOps := len(ops)

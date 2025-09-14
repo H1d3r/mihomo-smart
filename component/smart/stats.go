@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
+	"github.com/samber/lo"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -794,7 +797,7 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 
 	var bestNodes []string
 	var bestWeights []float64
-	for i := 0; i < len(nodeList); i++ {
+	for i := 0; i < len(nodeList) && i < 9; i++ {
 		bestNodes = append(bestNodes, nodeList[i].name)
 		bestWeights = append(bestWeights, nodeList[i].weight)
 	}
@@ -1007,16 +1010,14 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 	prefetchASNs := 0
 
 	type prefetchItem struct {
-		target     string
-		weightType string
-		bestNode   string
-		bestWeight float64
+		target      string
+		weightType  string
+		bestNodes   []string
+		bestWeights []float64
 	}
 
 	var domainItems []prefetchItem
 	var asnItems []prefetchItem
-	var bestNode string
-	var bestWeight float64
 
 	// 域名
 	for domain, activeTypes := range domains {
@@ -1025,28 +1026,23 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 			if err != nil || len(bestNodes) == 0 {
 				continue
 			}
-			found := false
-			for i, node := range bestNodes {
-				if node != "" && bestWeights[i] > 0 {
-					if _, exists := availableProxyMap[node]; exists {
-						bestNode = node
-						bestWeight = bestWeights[i]
-						found = true
-						break
-					}
+			nodes := make([]string, 0, len(bestNodes))
+			weights := make([]float64, 0, len(bestWeights))
+			for i := 0; i < len(bestNodes); i++ {
+				if _, exists := availableProxyMap[bestNodes[i]]; exists {
+					nodes = append(nodes, bestNodes[i])
+					weights = append(weights, bestWeights[i])
 				}
 			}
-			if !found {
-				continue
+			if len(nodes) > 0 {
+				item := prefetchItem{
+					target:      domain,
+					weightType:  weightType,
+					bestNodes:   nodes,
+					bestWeights: weights,
+				}
+				domainItems = append(domainItems, item)
 			}
-
-			item := prefetchItem{
-				target:     domain,
-				weightType: weightType,
-				bestNode:   bestNode,
-				bestWeight: bestWeight,
-			}
-			domainItems = append(domainItems, item)
 		}
 	}
 
@@ -1065,86 +1061,103 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 			if err != nil || len(bestNodes) == 0 {
 				continue
 			}
-			var bestNode string
-			var bestWeight float64
-			found := false
-			for i, node := range bestNodes {
-				if node != "" && bestWeights[i] > 0 {
-					if _, exists := availableProxyMap[node]; exists {
-						bestNode = node
-						bestWeight = bestWeights[i]
-						found = true
-						break
-					}
+			nodes := make([]string, 0, len(bestNodes))
+			weights := make([]float64, 0, len(bestWeights))
+			for i := 0; i < len(bestNodes); i++ {
+				if _, exists := availableProxyMap[bestNodes[i]]; exists {
+					nodes = append(nodes, bestNodes[i])
+					weights = append(weights, bestWeights[i])
 				}
 			}
-			if !found {
-				continue
+			if len(nodes) > 0 {
+				item := prefetchItem{
+					target:      asn,
+					weightType:  weightType,
+					bestNodes:   nodes,
+					bestWeights: weights,
+				}
+				asnItems = append(asnItems, item)
 			}
-			item := prefetchItem{
-				target:     asn,
-				weightType: weightType,
-				bestNode:   bestNode,
-				bestWeight: bestWeight,
-			}
-			asnItems = append(asnItems, item)
 		}
 	}
 
 	// 域名
 	for _, item := range domainItems {
-		oldNode, oldWeight := s.GetPrefetchResult(group, config, item.target, item.weightType)
-		newWeight := math.Round(item.bestWeight*100) / 100
-		oldWeightRounded := math.Round(oldWeight*100) / 100
+		oldNodes, oldWeights := s.GetPrefetchResult(group, config, item.target, item.weightType)
 
-		if oldNode == "" {
-			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		nodeWeightPairs := make([]string, len(item.bestNodes))
+		for i := range item.bestNodes {
+			nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", item.bestNodes[i], item.bestWeights[i])
+		}
+
+		oldNodeWeightPairs := make([]string, len(oldNodes))
+		for i := range oldNodes {
+			oldNodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", oldNodes[i], oldWeights[i])
+		}
+
+		if len(oldNodes) == 0 {
+			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 			prefetchDomains++
-			log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
-				item.target, item.bestNode, group, item.weightType, item.bestWeight)
+			log.Debugln("[SmartStore] Prefetching for group [%s]: domain [%s] => type [%s] => [%s] (no old result)",
+				group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "))
 			continue
 		}
 
-		if oldNode == item.bestNode {
-			if newWeight != oldWeightRounded {
-				s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		newWeight := math.Round(lo.Sum(item.bestWeights)*100) / 100
+		oldWeight := math.Round(lo.Sum(oldWeights)*100) / 100
+
+		if slices.Equal(oldNodes, item.bestNodes) {
+			if newWeight != oldWeight {
+				s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 				prefetchDomains++
-				log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
-					item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+				log.Debugln("[SmartStore] Prefetching for group [%s]: domain [%s] => type [%s] => [%s] (old: [%s], same node, weight changed)",
+					group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "), strings.Join(oldNodeWeightPairs, ", "))
 			}
-		} else if newWeight > oldWeightRounded {
-			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		} else if newWeight > oldWeight {
+			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 			prefetchDomains++
-			log.Debugln("[SmartStore] Prefetching domain [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
-				item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+			log.Debugln("[SmartStore] Prefetching for group [%s]: domain [%s] => type [%s] => [%s] (old: [%s], upgraded)",
+				group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "), strings.Join(oldNodeWeightPairs, ", "))
 		}
 	}
 
 	// ASN
 	for _, item := range asnItems {
-		oldNode, oldWeight := s.GetPrefetchResult(group, config, item.target, item.weightType)
-		newWeight := math.Round(item.bestWeight*100) / 100
-		oldWeightRounded := math.Round(oldWeight*100) / 100
-		if oldNode == "" {
-			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		oldNodes, oldWeights := s.GetPrefetchResult(group, config, item.target, item.weightType)
+
+		nodeWeightPairs := make([]string, len(item.bestNodes))
+		for i := range item.bestNodes {
+			nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", item.bestNodes[i], item.bestWeights[i])
+		}
+
+		oldNodeWeightPairs := make([]string, len(oldNodes))
+		for i := range oldNodes {
+			oldNodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", oldNodes[i], oldWeights[i])
+		}
+
+		if len(oldNodes) == 0 {
+			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 			prefetchASNs++
-			log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (no old result)",
-				item.target, item.bestNode, group, item.weightType, item.bestWeight)
+			log.Debugln("[SmartStore] Prefetching for group [%s]: ASN [%s] => type [%s] => [%s] (no old result)",
+				group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "))
 			continue
 		}
 
-		if oldNode == item.bestNode {
-			if newWeight != oldWeightRounded {
-				s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		newWeight := math.Round(lo.Sum(item.bestWeights)*100) / 100
+		oldWeight := math.Round(lo.Sum(oldWeights)*100) / 100
+
+		if slices.Equal(oldNodes, item.bestNodes) {
+			if newWeight != oldWeight {
+				s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 				prefetchASNs++
-				log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, same node, weight changed)",
-					item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+				log.Debugln("[SmartStore] Prefetching for group [%s]: ASN [%s] => type [%s] => [%s] (old: [%s], same node, weight changed)",
+					group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "), strings.Join(oldNodeWeightPairs, ", "))
 			}
-		} else if newWeight > oldWeightRounded {
-			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNode, item.bestWeight)
+		} else if newWeight > oldWeight {
+			s.StorePrefetchResult(group, config, item.target, item.weightType, item.bestNodes, item.bestWeights)
 			prefetchASNs++
-			log.Debugln("[SmartStore] Prefetching ASN [%s] with best node [%s] for group [%s], weight type [%s], weight: %.2f (old: %.2f, upgraded)",
-				item.target, item.bestNode, group, item.weightType, item.bestWeight, oldWeight)
+			log.Debugln("[SmartStore] Prefetching for group [%s]: ASN [%s] => type [%s] => [%s] (old: [%s], upgraded)",
+				group, item.target, item.weightType, strings.Join(nodeWeightPairs, ", "), strings.Join(oldNodeWeightPairs, ", "))
 		}
 	}
 
@@ -1156,14 +1169,11 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 // GetNodeStates 获取节点状态
 func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 	pathPrefix := FormatDBKey("smart", KeyTypeNode, config, group, "")
-
 	cacheKeyPrefix := FormatCacheKey(KeyTypeNode, config, group, "")
 	cacheResults := GetCacheValuesByPrefix(cacheKeyPrefix)
 
 	if len(cacheResults) > 0 {
 		result := make(map[string][]byte, len(cacheResults))
-		allFromCache := true
-
 		for key, value := range cacheResults {
 			parts := strings.Split(key, ":")
 			if len(parts) > 0 {
@@ -1172,35 +1182,31 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 				var err error
 
 				switch v := value.(type) {
-				case []byte:
-					data = make([]byte, len(v))
-					copy(data, v)
 				case NodeState:
 					data, err = json.Marshal(v)
 				default:
-					allFromCache = false
 					continue
 				}
-
 				if err == nil && data != nil {
 					result[nodeName] = data
-				} else {
-					allFromCache = false
 				}
 			}
 		}
 
 		if allFromCache {
-			globalQueueMutex.RLock()
-			for _, op := range globalOperationQueue {
+			ops := getGlobalQueueSnapshot()
+			for _, op := range ops {
 				if op.Type == OpSaveNodeState && op.Group == group && op.Config == config {
 					result[op.Node] = op.Data
 				}
 			}
-			globalQueueMutex.RUnlock()
-
-			return result, nil
+			
+			if len(result) > 0 {
+				return result, nil
+			}
 		}
+		
+		return result, nil
 	}
 
 	rawResult, err := s.GetSubBytesByPath(pathPrefix, true)
@@ -1209,32 +1215,24 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 	}
 
 	result := make(map[string][]byte)
-
 	for fullPath, data := range rawResult {
 		parts := strings.Split(fullPath, "/")
 		if len(parts) > 0 {
 			nodeName := parts[len(parts)-1]
 			result[nodeName] = data
+			var nodeState NodeState
+			if json.Unmarshal(data, &nodeState) == nil {
+				SetCacheValue(FormatCacheKey(KeyTypeNode, config, group, nodeName), nodeState)
+			}
 		}
 	}
 
-	for nodeName, data := range result {
-		cacheKey := FormatCacheKey(KeyTypeNode, config, group, nodeName)
-		var nodeState NodeState
-		if json.Unmarshal(data, &nodeState) == nil {
-			SetCacheValue(cacheKey, nodeState)
-		} else {
-			SetCacheValue(cacheKey, data)
-		}
-	}
-
-	globalQueueMutex.RLock()
-	for _, op := range globalOperationQueue {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
 		if op.Type == OpSaveNodeState && op.Group == group && op.Config == config {
 			result[op.Node] = op.Data
 		}
 	}
-	globalQueueMutex.RUnlock()
 
 	return result, nil
 }
@@ -1276,14 +1274,12 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
 		}
 
 		if allFromCache && len(result) > 0 {
-			globalQueueMutex.RLock()
-			for _, op := range globalOperationQueue {
+			ops := getGlobalQueueSnapshot()
+			for _, op := range ops {
 				if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
 					result[op.Node] = op.Data
 				}
 			}
-			globalQueueMutex.RUnlock()
-
 			return result, nil
 		}
 	}
@@ -1312,13 +1308,12 @@ func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]by
 		}
 	}
 
-	globalQueueMutex.RLock()
-	for _, op := range globalOperationQueue {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
 		if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
 			result[op.Node] = op.Data
 		}
 	}
-	globalQueueMutex.RUnlock()
 
 	return result, nil
 }
@@ -1374,8 +1369,8 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
 		}
 	}
 
-	globalQueueMutex.RLock()
-	for _, op := range globalOperationQueue {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
 		if op.Type == OpSaveStats && op.Group == group && op.Config == config {
 			domain := op.Domain
 			nodeName := op.Node
@@ -1389,7 +1384,6 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
 			result[domain][nodeName] = op.Data
 		}
 	}
-	globalQueueMutex.RUnlock()
 
 	if len(result) < maxDomainsLimit {
 		pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
@@ -1519,8 +1513,8 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
 		}
 	}
 
-	globalQueueMutex.RLock()
-	for _, op := range globalOperationQueue {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
 		if op.Group == group && op.Config == config {
 			if op.Type == OpSaveNodeState {
 				nodesMap[op.Node] = true
@@ -1529,7 +1523,6 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
 			}
 		}
 	}
-	globalQueueMutex.RUnlock()
 
 	var result []string
 	for node := range nodesMap {
@@ -1545,26 +1538,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		return nil
 	}
 
-	globalQueueMutex.Lock()
-	newQueue := make([]StoreOperation, 0, len(globalOperationQueue))
-	for _, op := range globalOperationQueue {
-		if op.Group == group && op.Config == config {
-			nodeMatches := false
-			for _, node := range nodes {
-				if op.Node == node {
-					nodeMatches = true
-					break
-				}
-			}
-			if !nodeMatches {
-				newQueue = append(newQueue, op)
-			}
-		} else {
-			newQueue = append(newQueue, op)
-		}
-	}
-	globalOperationQueue = newQueue
-	globalQueueMutex.Unlock()
+	removeNodesFromQueue(group, config, nodes)
 
 	allStats, err := s.GetAllStats(group, config, true)
 	if err != nil {
@@ -1715,8 +1689,12 @@ func (s *Store) clearThrottlePrefix(prefix string) {
 	n.cacheThrottle.mutex.Unlock()
 }
 
-// 标记连接失败
-func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, triedProxies map[string]bool) {
+func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, triedProxies map[string]bool, metadata *C.Metadata) {
+	domain, _ := GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+	if domain == "" {
+		return
+	}
+	
 	n := &s.networkFailureManager
 	groupKey := fmt.Sprintf("%s:%s", group, config)
 	now := time.Now()
@@ -1728,23 +1706,34 @@ func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, tri
 		if now.Sub(last) >= n.writeInterval {
 			n.cacheThrottle.lastSet[key] = now
 			n.cacheThrottle.mutex.Unlock()
-			SetCacheValue(key, now)
+			SetCacheValue(key, domain)
 		} else {
 			n.cacheThrottle.mutex.Unlock()
 		}
 	}
 
 	failedPrefix := FormatCacheKey(KeyTypeFailed, config, group, "")
-	failedCount := len(GetCacheValuesByPrefix(failedPrefix))
-	threshold := int(math.Min(float64(proxiesCount), math.Max(float64(proxiesCount)/1.5, 3)))
+	failedCache := GetCacheValuesByPrefix(failedPrefix)
+	failedNodeCount := len(failedCache)
+
+	domainSet := make(map[string]struct{})
+	for _, v := range failedCache {
+		if d, ok := v.(string); ok {
+			domainSet[d] = struct{}{}
+		}
+	}
+	failedDomainCount := len(domainSet)
+
+	nodeThreshold := int(math.Min(float64(proxiesCount), math.Max(float64(proxiesCount)/1.5, 3)))
+	domainThreshold := 5
 
 	n.lock.Lock()
 	defer n.lock.Unlock()
-	if failedCount >= threshold && !n.status[groupKey] {
+	if failedNodeCount >= nodeThreshold && failedDomainCount >= domainThreshold && !n.status[groupKey] {
 		n.status[groupKey] = true
 		n.successCount[groupKey] = 0
 		n.lastFailure[groupKey] = now
-		log.Warnln("[SmartStore] Network failure detected for group [%s:%s] after [%d] consecutive failures", group, config, failedCount)
+		log.Warnln("[SmartStore] Network failure detected for group [%s:%s] after [%d] consecutive failures, [%d] unique domains", group, config, failedNodeCount, failedDomainCount)
 	}
 }
 

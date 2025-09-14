@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/log"
@@ -69,8 +70,7 @@ var (
 	globalInitInstances = make(map[string]bool)
 	globalInitLock      sync.Mutex
 
-	globalOperationQueue []StoreOperation
-	globalQueueMutex     sync.RWMutex
+	globalOperationQueue atomic.TypedValue[[]StoreOperation]
 
 	globalCacheParams struct {
 		BatchSaveThreshold int
@@ -129,13 +129,20 @@ type (
 		BlockedUntil       time.Time      `json:"blocked_until"`
 		Degraded           bool           `json:"degraded"`
 		DegradedFactor     float64        `json:"degraded_factor"`
-		DomainFailureCount map[string]int `json:"domain_failure_count"` // 新增：记录每个域名的失败次数
+		DomainFailureCount map[string]int `json:"domain_failure_count"`
 	}
 
 	RankingData struct {
 		Ranking     map[string]string `json:"ranking"`
 		LastUpdated time.Time         `json:"last_updated"`
 	}
+
+	NodeWithWeight struct {
+		Nodes   []string  `json:"nodes"`
+		Weights []float64 `json:"weights"`
+	}
+
+	PrefetchMap map[string]NodeWithWeight
 )
 
 func InitializeGlobalParams() {
@@ -415,21 +422,14 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 		return errors.New("flush level cannot be empty")
 	}
 
-	globalQueueMutex.Lock()
 	if level == "all" {
-		globalOperationQueue = make([]StoreOperation, 0, MinBatchThreshLimit)
-	} else if level == "config" || level == "group" {
-		newQueue := make([]StoreOperation, 0, MinBatchThreshLimit)
-		for _, op := range globalOperationQueue {
-			if level == "config" && op.Config != config {
-				newQueue = append(newQueue, op)
-			} else if level == "group" && !(op.Group == group && op.Config == config) {
-				newQueue = append(newQueue, op)
-			}
-		}
-		globalOperationQueue = newQueue
+		emptyQueue := make([]StoreOperation, 0, MinBatchThreshLimit)
+		replaceGlobalQueue(emptyQueue)
+	} else if level == "config" {
+		filterQueueByConfig(config)
+	} else if level == "group" {
+		filterQueueByGroup(group, config)
 	}
-	globalQueueMutex.Unlock()
 
 	ClearCacheByLevel(level, config, group)
 
@@ -460,7 +460,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 
 // 清空所有缓存
 func (s *Store) FlushAll() error {
-	log.Debugln("[SmartStore] Starting FlushAll, current queue length: %d", len(globalOperationQueue))
+	log.Debugln("[SmartStore] Starting FlushAll, current queue length: %d", len(getGlobalQueueSnapshot()))
 	err := s.FlushByLevel("all", "", "")
 	if err == nil {
 		log.Debugln("[SmartStore] All Smart data cleared")

@@ -63,32 +63,32 @@ func RemoveCacheValuesByPrefix(prefix string) {
 }
 
 // 存储预取结果
-func (s *Store) StorePrefetchResult(group, config string, target string, weightType string, proxyName string, weight float64) {
-	if target == "" || proxyName == "" {
+func (s *Store) StorePrefetchResult(group, config string, target string, weightType string, proxyNames []string, weights []float64) {
+	if target == "" || len(proxyNames) == 0 {
 		return
 	}
 
 	cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
 
-	var prefetchMap map[string]interface{}
+	var prefetchMap PrefetchMap
 	existingValue, found := GetCacheValue(cacheKey)
 	if found {
-		switch v := existingValue.(type) {
-		case map[string]interface{}:
-			prefetchMap = make(map[string]interface{}, len(v)+1)
-			for k, v2 := range v {
-				prefetchMap[k] = v2
+		switch existingMap := existingValue.(type) {
+		case PrefetchMap:
+			prefetchMap = make(PrefetchMap, len(existingMap)+1)
+			for weightType, nodeWeight := range existingMap {
+				prefetchMap[weightType] = nodeWeight
 			}
 		default:
-			prefetchMap = make(map[string]interface{})
+			prefetchMap = make(PrefetchMap)
 		}
 	} else {
-		prefetchMap = make(map[string]interface{})
+		prefetchMap = make(PrefetchMap)
 	}
 
-	prefetchMap[weightType] = map[string]interface{}{
-		"node":   proxyName,
-		"weight": weight,
+	prefetchMap[weightType] = NodeWithWeight{
+		Nodes:   proxyNames,
+		Weights: weights,
 	}
 	SetCacheValue(cacheKey, prefetchMap)
 
@@ -97,8 +97,7 @@ func (s *Store) StorePrefetchResult(group, config string, target string, weightT
 		return
 	}
 
-	globalQueueMutex.Lock()
-	globalOperationQueue = append(globalOperationQueue, StoreOperation{
+	appendToGlobalQueue(StoreOperation{
 		Type:   OpSavePrefetch,
 		Group:  group,
 		Config: config,
@@ -107,9 +106,8 @@ func (s *Store) StorePrefetchResult(group, config string, target string, weightT
 	})
 
 	globalCacheParams.mutex.RLock()
-	needFlush := len(globalOperationQueue) >= globalCacheParams.BatchSaveThreshold
+	needFlush := len(getGlobalQueueSnapshot()) >= globalCacheParams.BatchSaveThreshold
 	globalCacheParams.mutex.RUnlock()
-	globalQueueMutex.Unlock()
 
 	if needFlush {
 		go s.FlushQueue(true)
@@ -117,68 +115,52 @@ func (s *Store) StorePrefetchResult(group, config string, target string, weightT
 }
 
 // 获取预取结果
-func (s *Store) GetPrefetchResult(group, config string, target string, weightType string) (string, float64) {
+func (s *Store) GetPrefetchResult(group, config string, target string, weightType string) ([]string, []float64) {
 	if target == "" {
-		return "", 0
+		return nil, nil
 	}
 
 	cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
 
 	if value, ok := GetCacheValue(cacheKey); ok {
-		if m, ok := value.(map[string]interface{}); ok {
+		if m, ok := value.(PrefetchMap); ok {
 			if res, exists := m[weightType]; exists {
-				if resMap, ok := res.(map[string]interface{}); ok {
-					node, _ := resMap["node"].(string)
-					weight, _ := resMap["weight"].(float64)
-					return node, weight
+				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
+					return res.Nodes, res.Weights
 				}
 			}
 		}
 	}
 
-	globalQueueMutex.RLock()
-	for _, op := range globalOperationQueue {
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
 		if op.Type == OpSavePrefetch && op.Group == group && op.Config == config && op.Domain == target {
-			var prefetchMap map[string]interface{}
+			var prefetchMap PrefetchMap
 			if err := json.Unmarshal(op.Data, &prefetchMap); err == nil {
 				if res, exists := prefetchMap[weightType]; exists {
-					if resMap, ok := res.(map[string]interface{}); ok {
-						node, _ := resMap["node"].(string)
-						weight, _ := resMap["weight"].(float64)
-						globalQueueMutex.RUnlock()
-						return node, weight
+					if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
+						return res.Nodes, res.Weights
 					}
 				}
 			}
 		}
 	}
-	globalQueueMutex.RUnlock()
 
 	dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
 	data, err := s.DBViewGetItem(dbKey)
 	if err == nil && data != nil {
-		var prefetchMap map[string]interface{}
+		var prefetchMap PrefetchMap
 		if err = json.Unmarshal(data, &prefetchMap); err == nil {
 			if res, exists := prefetchMap[weightType]; exists {
-				if resMap, ok := res.(map[string]interface{}); ok {
-					node, _ := resMap["node"].(string)
-					weight, _ := resMap["weight"].(float64)
+				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
 					SetCacheValue(cacheKey, prefetchMap)
-					return node, weight
+					return res.Nodes, res.Weights
 				}
-			}
-		}
-		// 兼容老格式
-		var oldMap map[string]string
-		if err = json.Unmarshal(data, &oldMap); err == nil {
-			if node, exists := oldMap[weightType]; exists {
-				SetCacheValue(cacheKey, oldMap)
-				return node, 0
 			}
 		}
 	}
 
-	return "", 0
+	return nil, nil
 }
 
 // 预加载所有预计算结果
@@ -210,7 +192,7 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
 			continue
 		}
 
-		var prefetchMap map[string]interface{}
+		var prefetchMap PrefetchMap
 		if err := json.Unmarshal(v, &prefetchMap); err != nil {
 			parseFailures++
 			continue
@@ -233,28 +215,28 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
 	return loadCount
 }
 
-func (s *Store) StoreUnwrapResult(group, config string, target string, proxyName string) {
-	if target == "" || proxyName == "" {
+func (s *Store) StoreUnwrapResult(group, config string, target string, proxyNames []string) {
+	if target == "" || len(proxyNames) == 0 {
 		return
 	}
 
 	key := FormatCacheKey(KeyTypeUnwrap, config, group, target)
-	SetCacheValue(key, proxyName)
+	SetCacheValue(key, proxyNames)
 }
 
-func (s *Store) GetUnwrapResult(group, config string, target string) string {
+func (s *Store) GetUnwrapResult(group, config string, target string) []string {
 	if target == "" {
-		return ""
+		return nil
 	}
 
 	key := FormatCacheKey(KeyTypeUnwrap, config, group, target)
 	if value, ok := GetCacheValue(key); ok {
-		if proxyName, isString := value.(string); isString {
-			return proxyName
+		if proxyNames, ok := value.([]string); ok {
+			return proxyNames
 		}
 	}
 
-	return ""
+	return nil
 }
 
 // 删除缓存结果
@@ -408,9 +390,7 @@ func (s *Store) AdjustCacheParameters() {
 	dataCache = newDataCache
 	globalCacheLock.Unlock()
 
-	globalQueueMutex.RLock()
-	queueLength := len(globalOperationQueue)
-	globalQueueMutex.RUnlock()
+	queueLength := len(getGlobalQueueSnapshot())
 
 	if (memoryUsage > 0.8 && queueLength > 0) ||
 		(memoryUsage > 0.6 && queueLength > globalCacheParams.BatchSaveThreshold/2) {
@@ -514,7 +494,7 @@ func UpdateCacheFromDBResult(fullPath string, data []byte) {
 					cacheValue = data
 				}
 			case KeyTypePrefetch:
-				var prefetchMap map[string]string
+				var prefetchMap PrefetchMap
 				if json.Unmarshal(data, &prefetchMap) == nil {
 					cacheValue = prefetchMap
 				} else {

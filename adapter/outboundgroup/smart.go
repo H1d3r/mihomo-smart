@@ -52,11 +52,7 @@ const (
 
 	longConnThreshold = 10 * time.Minute
 
-	networkFailureThreshold = 5
 	maxRetries              = 3
-
-	maxCountValue       = 1000000
-	maxTrafficStatValue = 10000000.0
 )
 
 var (
@@ -90,7 +86,6 @@ type Smart struct {
 	weightModel    *lightgbm.WeightModel
 	strategy       string
 	sampleRate     float64
-	noParallelDial bool
 }
 
 type priorityRule struct {
@@ -217,11 +212,8 @@ func doParallelDialContext[T interface {
 	return nil, lo.Empty[T](), os.ErrDeadlineExceeded
 }
 
-func (s *Smart) parallelDialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	availableProxies := s.GetProxies(true)
-	if len(availableProxies) == 0 {
-		return nil, errors.New("no proxy available")
-	}
 
 	triedProxies := make(map[string]bool)
 
@@ -274,7 +266,7 @@ func (s *Smart) parallelDialContext(ctx context.Context, metadata *C.Metadata) (
 
 			if err == nil {
 				if s.store != nil {
-					return s.parallelWrapConnWithMetric(c, p, metadata), nil
+					return s.WrapConnWithMetric(c, p, metadata), nil
 				}
 				c.AppendToChains(s)
 				s.onDialSuccess()
@@ -282,29 +274,24 @@ func (s *Smart) parallelDialContext(ctx context.Context, metadata *C.Metadata) (
 			}
 
 			finalErr = err
-			if s.selected != "" {
+			if s.selected != "" && len(proxies) == 1 && proxies[0].Name() == s.selected {
 				break
 			}
 		}
 		if finalErr != nil && s.store != nil {
 			s.onDialFailed(proxies[0].Type(), finalErr, s.GroupBase.healthCheck)
-			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
+			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies, metadata)
 		}
 		return nil, finalErr
 	}
 
 	if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
 		proxies := s.selectFallbacks(metadata, availableProxies)
-		if len(proxies) == 0 {
-			return nil, errors.New("no proxy found in network failure mode")
-		}
 		return tryDial(proxies)
 	}
 
 	proxies := s.selectProxies(metadata, availableProxies)
-	if len(proxies) == 0 {
-		proxies = availableProxies
-	}
+
 	return tryDial(proxies)
 }
 
@@ -335,119 +322,75 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 			}
 		}
 	}
-	s.recordConnectionStats("connected", metadata, proxy, time.Since(start).Milliseconds(), 0, 0, 0, 0, 0, 0, false, nil)
+	s.recordConnectionStats("success", metadata, proxy, time.Since(start).Milliseconds(), 0, 0, 0, 0, 0, 0, false, nil)
 	return c, nil
-}
-
-func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	if !s.noParallelDial {
-		return s.parallelDialContext(ctx, metadata)
-	}
-
-	proxies := s.GetProxies(true)
-	if len(proxies) == 0 {
-		return nil, errors.New("no proxy available")
-	}
-
-	tryDial := func(proxy C.Proxy, proxies []C.Proxy, triedProxies map[string]bool, maxRetries int, wrapMetric bool) (C.Conn, error) {
-		var finalErr error
-		for i := 0; i < maxRetries; i++ {
-			historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
-			const thresholdRatio = 2.0
-			var timeout time.Duration
-			if historyConnectTime > 0 {
-				timeout = time.Duration(float64(historyConnectTime)*thresholdRatio) * time.Millisecond
-				if timeout > C.DefaultTCPTimeout {
-					timeout = C.DefaultTCPTimeout
-				}
-			} else {
-				timeout = C.DefaultTCPTimeout
-			}
-			ctxDial, cancel := context.WithTimeout(ctx, timeout)
-			start := time.Now()
-			c, err := proxy.DialContext(ctxDial, metadata)
-			cancel()
-			connectTime := time.Since(start).Milliseconds()
-
-			if err == nil {
-				if s.store != nil && wrapMetric {
-					wrappedConn, wrapErr := s.wrapConnWithMetric(c, proxy, metadata, connectTime)
-					if wrapErr != nil {
-						c.Close()
-						finalErr = wrapErr
-						if i == maxRetries-1 {
-							break
-						}
-						if s.selected != "" {
-							break
-						}
-						proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-						if triedProxies[proxy.Name()] {
-							break
-						}
-						triedProxies[proxy.Name()] = true
-						continue
-					}
-					return wrappedConn, nil
-				}
-				c.AppendToChains(s)
-				s.onDialSuccess()
-				return c, nil
-			}
-
-			finalErr = err
-			if i == maxRetries-1 {
-				break
-			}
-			if s.selected != "" {
-				break
-			}
-			proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-			if triedProxies[proxy.Name()] {
-				break
-			}
-			triedProxies[proxy.Name()] = true
-		}
-		if finalErr != nil && s.store != nil {
-			s.onDialFailed(proxy.Type(), finalErr, s.GroupBase.healthCheck)
-			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
-		}
-		return nil, finalErr
-	}
-
-	triedProxies := make(map[string]bool)
-
-	if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
-		proxy := s.fallbackToLoadBalance(metadata, proxies)
-		if proxy == nil {
-			return nil, errors.New("no proxy found in network failure mode")
-		}
-		triedProxies[proxy.Name()] = true
-		return tryDial(proxy, proxies, triedProxies, maxRetries, true)
-	}
-
-	proxy := s.selectProxy(metadata, false)
-	if proxy == nil {
-		proxy = proxies[0]
-	}
-	triedProxies[proxy.Name()] = true
-	return tryDial(proxy, proxies, triedProxies, maxRetries, true)
 }
 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
 	proxies := s.GetProxies(true)
-	if len(proxies) == 0 {
-		return nil, errors.New("no proxy available")
-	}
 	triedProxies := make(map[string]bool)
-	proxy := s.selectProxy(metadata, false)
-	if proxy == nil {
-		proxy = proxies[0]
+
+	fillAvailableProxies := func(initialProxies []C.Proxy, allProxies []C.Proxy) []C.Proxy {
+		availableProxies := make([]C.Proxy, 0, len(initialProxies))
+		
+		for _, p := range initialProxies {
+			if p.SupportUDP() {
+				availableProxies = append(availableProxies, p)
+			}
+		}
+
+		if len(availableProxies) < maxRetries && len(allProxies) >= maxRetries {
+			seen := make(map[string]struct{}, len(availableProxies))
+			for _, p := range availableProxies {
+				seen[p.Name()] = struct{}{}
+			}
+			
+			shuffledProxies := make([]C.Proxy, len(allProxies))
+			copy(shuffledProxies, allProxies)
+			rand.Shuffle(len(shuffledProxies), func(i, j int) {
+				shuffledProxies[i], shuffledProxies[j] = shuffledProxies[j], shuffledProxies[i]
+			})
+			
+			for _, fp := range shuffledProxies {
+				if len(availableProxies) >= maxRetries {
+					break
+				}
+				if _, exists := seen[fp.Name()]; !exists && fp.SupportUDP() {
+					availableProxies = append(availableProxies, fp)
+					seen[fp.Name()] = struct{}{}
+				}
+			}
+		}
+		
+		return availableProxies
 	}
-	triedProxies[proxy.Name()] = true
+
+	var availableProxies []C.Proxy
+
+	if s.selected != "" {
+		for _, p := range proxies {
+			if p.Name() == s.selected {
+				availableProxies = []C.Proxy{p}
+				break
+			}
+		}
+	}
+
+	if len(availableProxies) == 0 {
+		if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
+			selectedProxies := s.selectFallbacks(metadata, proxies)
+			availableProxies = fillAvailableProxies(selectedProxies, proxies)
+		} else {
+			selectedProxies := s.selectProxies(metadata, proxies)
+			availableProxies = fillAvailableProxies(selectedProxies, proxies)
+		}
+	}
 
 	var finalErr error
-	for i := 0; i < maxRetries; i++ {
+	var proxy C.Proxy
+	for i := 0; i < maxRetries && i < len(availableProxies); i++ {
+		proxy = availableProxies[i]
+		triedProxies[proxy.Name()] = true
 		historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
 		const thresholdRatio = 2.0
 		var timeout time.Duration
@@ -478,63 +421,42 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		if s.store != nil {
 			s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
 		}
-		triedProxies[proxy.Name()] = true
-		if s.selected != "" {
-			break
-		}
-		proxy = s.selectNextProxy(metadata, proxies, triedProxies)
-		if triedProxies[proxy.Name()] {
+		if s.selected != "" && len(availableProxies) == 1 && availableProxies[0].Name() == s.selected {
 			break
 		}
 	}
 	if finalErr != nil && s.store != nil {
 		s.onDialFailed(proxy.Type(), finalErr, s.GroupBase.healthCheck)
-		s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies)
+		s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies, metadata)
 	}
 	return nil, finalErr
 }
 
 func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
-	proxy := s.selectProxy(metadata, touch)
+	proxies := s.selectProxies(metadata, s.GetProxies(touch))
 
-	if proxy != nil && s.store != nil {
+	if s.store != nil {
 		domain := ""
 		if metadata != nil {
 			domain, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
 			if domain != "" {
-				s.store.StoreUnwrapResult(s.Name(), s.configName, domain, proxy.Name())
+				names := make([]string, 0, len(proxies))
+				for _, p := range proxies {
+					names = append(names, p.Name())
+				}
+				s.store.StoreUnwrapResult(s.Name(), s.configName, domain, names)
 			}
 		}
 	}
 
-	return proxy
+	return proxies[0]
 }
 
 func (s *Smart) IsL3Protocol(metadata *C.Metadata) bool {
 	return s.Unwrap(metadata, false).IsL3Protocol(metadata)
 }
 
-func (s *Smart) wrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) (C.Conn, error) {
-	c.AppendToChains(s)
-	c = s.registerClosureMetricsCallback(c, proxy, metadata)
-
-	start := time.Now()
-
-	wrappedConn := callback.NewFirstReadCallBackConn(c, func(err error) {
-		latency := time.Since(start).Milliseconds()
-		if err == nil {
-			s.onDialSuccess()
-			s.recordConnectionStats("success", metadata, proxy, connectTime, latency, 0, 0, 0, 0, 0, false, nil)
-		} else {
-			s.onDialFailed(proxy.Type(), err, s.GroupBase.healthCheck)
-			s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
-		}
-	})
-
-	return wrappedConn, nil
-}
-
-func (s *Smart) parallelWrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
+func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
 	c.AppendToChains(s)
 	c = s.registerClosureMetricsCallback(c, proxy, metadata)
 
@@ -861,203 +783,17 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 	}
 }
 
-func (s *Smart) selectProxy(metadata *C.Metadata, touch bool) C.Proxy {
-	proxies := s.GetProxies(touch)
-	if metadata == nil || len(proxies) == 0 {
-		if len(proxies) > 0 {
-			return proxies[0]
-		}
-		return nil
+func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
+	if metadata == nil {
+		return proxies
 	}
 
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {
-				return p
+				return []C.Proxy{p}
 			}
 		}
-	}
-
-	if s.store == nil {
-		return proxies[0]
-	}
-
-	blockedNodes := make(map[string]bool)
-	stateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
-	for nodeName, data := range stateData {
-		var state smart.NodeState
-		if json.Unmarshal(data, &state) == nil {
-			if !state.BlockedUntil.IsZero() && state.BlockedUntil.After(time.Now()) {
-				blockedNodes[nodeName] = true
-			}
-		}
-	}
-
-	findProxyByName := func(names []string) C.Proxy {
-		for _, name := range names {
-			if blockedNodes[name] {
-				continue
-			}
-			for _, p := range proxies {
-				if p.Name() == name && p.AliveForTestUrl(s.testUrl) {
-					return p
-				}
-			}
-		}
-		return nil
-	}
-
-	weightType := smart.WeightTypeTCP
-	if metadata.NetWork == C.UDP {
-		weightType = smart.WeightTypeUDP
-	}
-
-	trySelector := func(target string, weightType string) C.Proxy {
-		// 检查解析缓存
-		if cachedProxyName := s.store.GetUnwrapResult(s.Name(), s.configName, target); cachedProxyName != "" {
-			if proxy := findProxyByName([]string{cachedProxyName}); proxy != nil {
-				s.store.DeleteCacheResult(smart.KeyTypeUnwrap, s.Name(), s.configName, target)
-				return proxy
-			}
-		}
-
-		// 检查预解析缓存
-		if cachedProxyName, _ := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); cachedProxyName != "" {
-			if proxy := findProxyByName([]string{cachedProxyName}); proxy != nil {
-				return proxy
-			}
-		}
-
-		// 实时计算最佳节点
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType, false)
-		if err == nil && len(bestNodes) > 0 {
-			if proxy := findProxyByName(bestNodes); proxy != nil {
-				return proxy
-			}
-		}
-
-		return nil
-	}
-
-	// 尝试使用域名信息选择
-	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		if proxy := trySelector(domain, weightType); proxy != nil {
-			return proxy
-		}
-	}
-
-	// 尝试使用ASN信息选择（50%概率）
-	if rand.Float64() < 0.5 {
-		asnNumber := s.getASNCode(metadata)
-		if asnNumber != "" {
-			asnWeightType := weightType
-			if weightType == smart.WeightTypeTCP {
-				asnWeightType = smart.WeightTypeTCPASN + ":" + asnNumber
-			} else {
-				asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
-			}
-
-			if proxy := trySelector(asnNumber, asnWeightType); proxy != nil {
-				return proxy
-			}
-		}
-	}
-
-	return s.fallbackToLoadBalance(metadata, proxies)
-}
-
-func (s *Smart) selectNextProxy(metadata *C.Metadata, availableProxies []C.Proxy, triedProxies map[string]bool) C.Proxy {
-	findFirstAvailable := func(names []string) C.Proxy {
-		for _, name := range names {
-			if name == "" || triedProxies[name] {
-				continue
-			}
-			for _, p := range availableProxies {
-				if p.Name() == name && p.AliveForTestUrl(s.testUrl) {
-					return p
-				}
-			}
-		}
-		return nil
-	}
-
-	if s.store == nil {
-		for _, p := range availableProxies {
-			if !triedProxies[p.Name()] && p.AliveForTestUrl(s.testUrl) {
-				return p
-			}
-		}
-		return availableProxies[0]
-	}
-
-	weightType := smart.WeightTypeTCP
-	if metadata.NetWork == C.UDP {
-		weightType = smart.WeightTypeUDP
-	}
-
-	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType, false)
-		if err == nil {
-			if proxy := findFirstAvailable(bestNodes); proxy != nil {
-				return proxy
-			}
-		}
-	}
-
-	asnNumber := s.getASNCode(metadata)
-	if asnNumber != "" {
-		asnWeightType := weightType
-		if weightType == smart.WeightTypeTCP {
-			asnWeightType = smart.WeightTypeTCPASN + ":" + asnNumber
-		} else {
-			asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
-		}
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnNumber, asnWeightType, false)
-		if err == nil {
-			if proxy := findFirstAvailable(bestNodes); proxy != nil {
-				return proxy
-			}
-		}
-	}
-
-	for _, p := range availableProxies {
-		if !triedProxies[p.Name()] {
-			if p.AliveForTestUrl(s.testUrl) {
-				return p
-			}
-		}
-	}
-
-	return availableProxies[0]
-}
-
-func (s *Smart) fallbackToLoadBalance(metadata *C.Metadata, proxies []C.Proxy) C.Proxy {
-	if len(proxies) == 0 {
-		return nil
-	}
-
-	if metadata == nil {
-		return proxies[0]
-	}
-
-	if s.fallback != nil {
-		proxy := s.fallback.Unwrap(metadata, true)
-		if proxy != nil {
-			return proxy
-		}
-	}
-	return proxies[0]
-}
-
-func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
-	if len(proxies) == 0 {
-		return nil
-	}
-
-	if metadata == nil {
-		return proxies
 	}
 
 	fallbacks := make([]C.Proxy, 0, len(proxies))
@@ -1077,16 +813,17 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 	}
 	fallbacks = append(fallbacks, proxies[piv:]...)
 	fallbacks = append(fallbacks, proxies[:piv]...)
+
+	if len(fallbacks) > 9 {
+		fallbacks = fallbacks[:9]
+	}
+
 	return fallbacks
 }
 
 func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
 	if metadata == nil {
 		return proxies
-	}
-
-	if len(proxies) == 0 {
-		return nil
 	}
 
 	if s.selected != "" {
@@ -1099,6 +836,11 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 
 	if s.store == nil {
 		return proxies
+	}
+
+	weightType := smart.WeightTypeTCP
+	if metadata.NetWork == C.UDP {
+		weightType = smart.WeightTypeUDP
 	}
 
 	blockedNodes := make(map[string]bool)
@@ -1116,6 +858,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 	for _, p := range proxies {
 		proxyByName[p.Name()] = p
 	}
+
 	findProxiesByNames := func(names []string) []C.Proxy {
 		proxies := make([]C.Proxy, 0, len(names))
 		for _, name := range names {
@@ -1128,12 +871,52 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return proxies
 	}
 
-	weightType := smart.WeightTypeTCP
-	if metadata.NetWork == C.UDP {
-		weightType = smart.WeightTypeUDP
+	fillProxies := func(selected []C.Proxy, all []C.Proxy, minCount int) []C.Proxy {
+		if len(selected) >= minCount {
+			return selected
+		}
+		if len(all) == len(selected) {
+			return selected
+		}
+		selectedNames := make(map[string]struct{}, len(selected))
+		for _, p := range selected {
+			selectedNames[p.Name()] = struct{}{}
+		}
+		remain := make([]C.Proxy, 0)
+		for _, p := range all {
+			if _, exists := selectedNames[p.Name()]; !exists {
+				remain = append(remain, p)
+			}
+		}
+		rand.Shuffle(len(remain), func(i, j int) {
+			remain[i], remain[j] = remain[j], remain[i]
+		})
+		for _, p := range remain {
+			selected = append(selected, p)
+			if len(selected) >= minCount {
+				break
+			}
+		}
+		return selected
 	}
 
 	trySelector := func(target string, weightType string) []C.Proxy {
+		// 检查解析缓存
+		if cachedProxyNames := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxyNames) != 0 {
+			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
+				s.store.DeleteCacheResult(smart.KeyTypeUnwrap, s.Name(), s.configName, target)
+				return proxies
+			}
+		}
+
+		// 检查预解析缓存
+		if cachedProxyNames, _ := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
+			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
+				return proxies
+			}
+		}
+
+		// 实时计算最佳节点
 		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType, false)
 		if err == nil && len(bestNodes) != 0 {
 			if proxies := findProxiesByNames(bestNodes); len(proxies) > 0 {
@@ -1147,8 +930,8 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 	// 尝试使用域名信息选择
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
 	if domain != "" {
-		if proxies := trySelector(domain, weightType); len(proxies) > 0 {
-			return proxies
+		if selected := trySelector(domain, weightType); len(selected) > 0 {
+			return fillProxies(selected, proxies, 9)
 		}
 	}
 
@@ -1163,8 +946,8 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 				asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
 			}
 
-			if proxies := trySelector(asnNumber, asnWeightType); len(proxies) > 0 {
-				return proxies
+			if selected := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
+				return fillProxies(selected, proxies, 9)
 			}
 		}
 	}
@@ -1173,11 +956,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 }
 
 func (s *Smart) SupportUDP() bool {
-	if s.disableUDP {
-		return false
-	}
-
-	return s.selectProxy(nil, false).SupportUDP()
+	return !s.disableUDP
 }
 
 func (s *Smart) MarshalJSON() ([]byte, error) {
@@ -1751,7 +1530,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	}
 
 	if status == "failed" {
-		s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true})
+		s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true}, metadata)
 	} else if status == "success" {
 		s.store.MarkConnectionSuccess(s.Name(), s.configName)
 	}
@@ -1784,17 +1563,9 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	var isModelPredicted bool
 
 	switch status {
-	case "connected":
-		if connectTime > 0 {
-			success := atomicRecord.Get("success").(int64)
-			oldConnectTime := atomicRecord.Get("connectTime").(int64)
-			newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
-			atomicRecord.Set("connectTime", newConnectTime)
-		}
 	case "success":
-		atomicRecord.Add("success", int64(1))
-
 		if connectTime > 0 {
+			atomicRecord.Add("success", int64(1))
 			success := atomicRecord.Get("success").(int64)
 			oldConnectTime := atomicRecord.Get("connectTime").(int64)
 			newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
@@ -2087,19 +1858,27 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 
 	// 处理域名相关缓存
 	bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType, false)
-	var bestNode string
-	var bestWeight float64
-	for i := 0; i < len(bestNodes); i++ {
+	var i int
+	for i = 0; i < len(bestNodes); i++ {
 		if bestNodes[i] != "" && bestNodes[i] != nodeName {
-			bestNode = bestNodes[i]
-			bestWeight = bestWeights[i]
 			break
 		}
 	}
-	if err == nil && bestNode != "" && bestWeight > currentWeight {
-		s.store.StorePrefetchResult(s.Name(), s.configName, domain, weightType, bestNode, bestWeight)
-		log.Debugln("[Smart] Added new prefetch result for domain: [%s] -> [%s] (weight: %.4f, type: %s)",
-			addressDisplay, bestNode, bestWeight, weightType)
+	if len(bestNodes) > i+1 {
+		bestNodes = append(bestNodes[:i], bestNodes[i+1:]...)
+		bestWeights = append(bestWeights[:i], bestWeights[i+1:]...)
+	} else {
+		bestNodes = bestNodes[:i]
+		bestWeights = bestWeights[:i]
+	}
+	if err == nil && len(bestNodes) > 0 && bestWeights[0] > currentWeight {
+		s.store.StorePrefetchResult(s.Name(), s.configName, domain, weightType, bestNodes, bestWeights)
+		nodeWeightPairs := make([]string, len(bestNodes))
+		for i := range bestNodes {
+			nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", bestNodes[i], bestWeights[i])
+		}
+		log.Debugln("[Smart] Added new prefetch result for Group [%s]: domain [%s] => type [%s] => [%s]",
+			s.Name(), domain, weightType, strings.Join(nodeWeightPairs, ", "))
 	}
 
 	// 处理ASN相关缓存
@@ -2113,19 +1892,27 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 		s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.Name(), s.configName, asnInfo)
 
 		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType, false)
-		var asnBestNode string
-		var asnBestWeight float64
-		for i := 0; i < len(bestNodes); i++ {
+		var i int
+		for i = 0; i < len(bestNodes); i++ {
 			if bestNodes[i] != "" && bestNodes[i] != nodeName {
-				asnBestNode = bestNodes[i]
-				asnBestWeight = bestWeights[i]
 				break
 			}
 		}
-		if err == nil && asnBestNode != "" && asnBestWeight > currentWeight {
-			s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, asnBestNode, asnBestWeight)
-			log.Debugln("[Smart] Added new ASN prefetch result: [%s] -> [%s] (weight: %.4f, type: %s)",
-				asnInfo, asnBestNode, asnBestWeight, fullAsnWeightType)
+		if len(bestNodes) > i+1 {
+			bestNodes = append(bestNodes[:i], bestNodes[i+1:]...)
+			bestWeights = append(bestWeights[:i], bestWeights[i+1:]...)
+		} else {
+			bestNodes = bestNodes[:i]
+			bestWeights = bestWeights[:i]
+		}
+		if err == nil && len(bestNodes) > 0 && bestWeights[0] > currentWeight {
+			s.store.StorePrefetchResult(s.Name(), s.configName, asnInfo, fullAsnWeightType, bestNodes, bestWeights)
+			nodeWeightPairs := make([]string, len(bestNodes))
+			for i := range bestNodes {
+				nodeWeightPairs[i] = fmt.Sprintf("%s: %.2f", bestNodes[i], bestWeights[i])
+			}
+			log.Debugln("[Smart] Added new prefetch result for Group [%s]: ASN [%s] => type [%s] => [%s]",
+				s.Name(), asnInfo, fullAsnWeightType, strings.Join(nodeWeightPairs, ", "))
 		}
 	}
 
@@ -2211,12 +1998,6 @@ func smartWithSampleRate(sampleRate float64) smartOption {
 	}
 }
 
-func smartWithNoParallelDial(npd bool) smartOption {
-	return func(s *Smart) {
-		s.noParallelDial = npd
-	}
-}
-
 func parseSmartOption(config map[string]any) ([]smartOption, string) {
 	opts := []smartOption{}
 
@@ -2248,12 +2029,6 @@ func parseSmartOption(config map[string]any) ([]smartOption, string) {
 			opts = append(opts, smartWithSampleRate(float64(v)))
 		case int:
 			opts = append(opts, smartWithSampleRate(float64(v)))
-		}
-	}
-
-	if elm, ok := config["no-parallel-dial"]; ok {
-		if npd, ok := elm.(bool); ok {
-			opts = append(opts, smartWithNoParallelDial(npd))
 		}
 	}
 
