@@ -1181,6 +1181,7 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 	cachedResult, hasResult := GetCacheValue(resultCacheKey)
 
 	var result map[string][]byte
+	needUpdateCache := false
 
 	if hasResult {
 		if resultMap, ok := cachedResult.(map[string][]byte); ok {
@@ -1203,12 +1204,10 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 			if len(parts) > 0 {
 				nodeName := parts[len(parts)-1]
 				result[nodeName] = data
-				
+				needUpdateCache = true
 				SetCacheValue(FormatCacheKey(KeyTypeNode, config, group, nodeName), data)
 			}
 		}
-		
-		SetCacheValue(resultCacheKey, result)
 	}
 
 	ops := getGlobalQueueSnapshot()
@@ -1217,12 +1216,10 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 		if op.Type == OpSaveNodeState && op.Group == group && op.Config == config {
 			result[op.Node] = op.Data
 			hasQueueUpdates = true
-			
-			SetCacheValue(FormatCacheKey(KeyTypeNode, config, group, op.Node), op.Data)
 		}
 	}
 
-	if hasQueueUpdates {
+	if hasQueueUpdates || needUpdateCache {
 		SetCacheValue(resultCacheKey, result)
 	}
 
@@ -1335,28 +1332,34 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
 		}
 	}
 
-	if result == nil {
-		result = make(map[string]map[string][]byte)
+	if result == nil || len(result) < maxDomainsLimit {
 		pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
-		rawResult, err := s.DBViewPrefixScan(pathPrefix, maxDomainsLimit)
+		dbCount, err := s.DBViewPrefixCount(pathPrefix)
 		if err != nil {
 			return nil, err
 		}
-		for path, data := range rawResult {
-			parts := strings.Split(path, "/")
-			if len(parts) < 6 {
-				continue
+		if result == nil || dbCount > maxDomainsLimit {
+			result = make(map[string]map[string][]byte)
+			rawResult, err := s.DBViewPrefixScan(pathPrefix, maxDomainsLimit)
+			if err != nil {
+				return nil, err
 			}
-			domain := parts[len(parts)-2]
-			node := parts[len(parts)-1]
-			if _, exists := result[domain]; !exists {
-				result[domain] = make(map[string][]byte)
+			for path, data := range rawResult {
+				parts := strings.Split(path, "/")
+				if len(parts) < 6 {
+					continue
+				}
+				domain := parts[len(parts)-2]
+				node := parts[len(parts)-1]
+				if _, exists := result[domain]; !exists {
+					result[domain] = make(map[string][]byte)
+				}
+				result[domain][node] = data
+				needUpdateCache = true
+				SetCacheValue(FormatCacheKey(KeyTypeStats, config, group, domain, node), data)
 			}
-			result[domain][node] = data
-			SetCacheValue(FormatCacheKey(KeyTypeStats, config, group, domain, node), data)
 		}
-		needUpdateCache = true
-	}
+    }
 
 	ops := getGlobalQueueSnapshot()
 	hasQueueUpdates := false
@@ -1369,7 +1372,6 @@ func (s *Store) GetAllStats(group, config string, all bool) (map[string]map[stri
 			}
 			result[domain][nodeName] = op.Data
 			hasQueueUpdates = true
-			SetCacheValue(FormatCacheKey(KeyTypeStats, config, group, domain, nodeName), op.Data)
 		}
 	}
 
