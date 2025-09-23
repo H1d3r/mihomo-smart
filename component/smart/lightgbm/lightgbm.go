@@ -1099,19 +1099,17 @@ func CreateModelInputFromStats(
 		IsTCP:                  isTCP,
 	}
 
-	if metadata != nil {
-		if metadata.DstIPASN == "unknown" {
-			input.DestIPASN = ""
-		} else {
-			input.DestIPASN = metadata.DstIPASN
-		}
-		input.Host, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-		if metadata.DstIP.IsValid() {
-			input.DestIP = metadata.DstIP.String()
-		}
-		input.DestPort = metadata.DstPort
-		input.DestGeoIP = metadata.DstGeoIP
+	if metadata.DstIPASN == "unknown" {
+		input.DestIPASN = ""
+	} else {
+		input.DestIPASN = metadata.DstIPASN
 	}
+	input.Host, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+	if metadata.DstIP.IsValid() {
+		input.DestIP = metadata.DstIP.String()
+	}
+	input.DestPort = metadata.DstPort
+	input.DestGeoIP = metadata.DstGeoIP
 
 	return input
 }
@@ -1120,7 +1118,7 @@ func CreateModelInputFromStatsRecord(
 	record *smart.StatsRecord, metadata *C.Metadata,
 	uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate float64,
 ) *ModelInput {
-	if record == nil || metadata == nil {
+	if record == nil {
 		return nil
 	}
 

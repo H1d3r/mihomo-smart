@@ -99,7 +99,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
-	closeSmartGroups()
+	closeSmart()
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
@@ -112,13 +112,14 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
 
+	initSmart(cfg.Profile, cfg.Proxies)
+
 	tunnel.OnInnerLoading()
 
 	initInnerTcp()
 	loadProvider(cfg.Providers)
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
-	initializeSmartGroups(cfg.Proxies)
 	runtime.GC()
 	tunnel.OnRunning()
 	updateUpdater(cfg)
@@ -441,8 +442,6 @@ func updateUsers(users []auth.AuthUser) {
 func updateProfile(cfg *config.Config) {
 	profileCfg := cfg.Profile
 
-	lightgbm.SetSmartCollectorSize(profileCfg.SmartCollectorSize)
-
 	profile.StoreSelected.Store(profileCfg.StoreSelected)
 	if profileCfg.StoreSelected {
 		patchSelectGroup(cfg.Proxies)
@@ -538,18 +537,21 @@ func updateIPTables(cfg *config.Config) {
 	log.Infoln("[IPTABLES] Setting iptables completed")
 }
 
-func initializeSmartGroups(proxies map[string]C.Proxy) {
+func initSmart(profile *config.Profile, proxies map[string]C.Proxy) {
+	cachefile.NewSmartStore(cachefile.Cache())
+	lightgbm.SetSmartCollectorSize(profile.SmartCollectorSize)
+
 	for _, proxy := range proxies {
 		if proxy.Type() == C.Smart {
 			if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
 				log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
-				smart.InitializeCache()
+				smart.InitCache()
 			}
 		}
 	}
 }
 
-func closeSmartGroups() {
+func closeSmart() {
 	for _, proxy := range tunnel.Proxies() {
 		if proxy.Type() == C.Smart {
 			adapter := proxy.Adapter()
@@ -565,7 +567,7 @@ func Shutdown() {
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
 
-	closeSmartGroups()
+	closeSmart()
 
 	log.Warnln("Mihomo shutting down")
 }

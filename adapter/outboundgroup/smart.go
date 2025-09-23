@@ -308,9 +308,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 			cancel()
 
 			if err == nil {
-				if s.store != nil {
-					return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
-				}
+				return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
 				c.AppendToChains(s)
 				return c, nil
 			}
@@ -321,13 +319,13 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				break
 			}
 		}
-		if finalErr != nil && s.store != nil {
+		if finalErr != nil {
 			s.store.MarkConnectionFailed(s.Name(), s.configName, len(proxies), triedProxies, metadata)
 		}
 		return nil, finalErr
 	}
 
-	if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
+	if s.store.CheckNetworkFailure(s.Name(), s.configName) {
 		proxies := s.selectFallbacks(metadata, availableProxies)
 		return tryDial(proxies)
 	}
@@ -400,7 +398,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 
 	if len(availableProxies) == 0 {
-		if s.store != nil && s.store.CheckNetworkFailure(s.Name(), s.configName) {
+		if s.store.CheckNetworkFailure(s.Name(), s.configName) {
 			selectedProxies := s.selectFallbacks(metadata, proxies)
 			availableProxies = fillAvailableProxies(selectedProxies, proxies)
 		} else {
@@ -433,16 +431,12 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 		if err == nil {
 			pc.AppendToChains(s)
-			if s.store != nil {
-				s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
-				pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
-			}
+			s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
+			pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
 			return pc, nil
 		}
 		finalErr = err
-		if s.store != nil {
-			s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
-		}
+		s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
 		if s.selected != "" && len(availableProxies) == 1 && availableProxies[0].Name() == s.selected {
 			break
 		}
@@ -453,19 +447,13 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 	proxies := s.selectProxies(metadata, s.GetProxies(touch))
-
-	if s.store != nil {
-		domain := ""
-		if metadata != nil {
-			domain, _ = smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-			if domain != "" {
-				names := make([]string, 0, len(proxies))
-				for _, p := range proxies {
-					names = append(names, p.Name())
-				}
-				s.store.StoreUnwrapResult(s.Name(), s.configName, domain, names)
-			}
+	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
+	if domain != "" {
+		names := make([]string, 0, len(proxies))
+		for _, p := range proxies {
+			names = append(names, p.Name())
 		}
+		s.store.StoreUnwrapResult(s.Name(), s.configName, domain, names)
 	}
 
 	return proxies[0]
@@ -539,15 +527,15 @@ func (s *Smart) Now() string {
 	return "Smart - Select"
 }
 
-func (s *Smart) InitializeCache() {
+func (s *Smart) InitCache() {
 	cacheFile := cachefile.Cache()
 	if cacheFile == nil || cacheFile.DB == nil {
-		return
+		log.Fatalln("[Smart] DB Cache file is nil for group %s", s.Name())
 	}
 
 	smartStore := cachefile.NewSmartStore(cacheFile)
 	if smartStore == nil {
-		return
+		log.Fatalln("[Smart] Failed to create SmartStore for group %s", s.Name())
 	}
 
 	s.store = smartStore.GetStore()
@@ -647,10 +635,6 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 }
 
 func (s *Smart) runPrefetch() {
-	if s.store == nil {
-		return
-	}
-
 	proxies := s.GetProxies(true)
 	proxyMap := make(map[string]string)
 	for _, p := range proxies {
@@ -662,10 +646,6 @@ func (s *Smart) runPrefetch() {
 }
 
 func (s *Smart) updateNodeRanking() {
-	if s.store == nil {
-		return
-	}
-
 	log.Debugln("[Smart] Starting node ranking update for policy group [%s]", s.Name())
 
 	proxies := s.GetProxies(true)
@@ -698,10 +678,6 @@ func (s *Smart) updateNodeRanking() {
 
 // 检查节点屏蔽状态
 func (s *Smart) checkAndRecoverDegradedNodes() {
-	if s.store == nil {
-		return
-	}
-
 	stateData, err := s.store.GetNodeStates(s.Name(), s.configName)
 	if err != nil {
 		return
@@ -814,10 +790,6 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 }
 
 func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
-	if metadata == nil {
-		return proxies
-	}
-
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {
@@ -852,20 +824,12 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 }
 
 func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
-	if metadata == nil {
-		return proxies
-	}
-
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {
 				return []C.Proxy{p}
 			}
 		}
-	}
-
-	if s.store == nil {
-		return proxies
 	}
 
 	weightType := smart.WeightTypeTCP
@@ -1022,10 +986,6 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Smart) cleanupOrphanedGroups() {
-	if s.store == nil {
-		return
-	}
-
 	allProxies := tunnel.Proxies()
 	existingSmartGroups := make(map[string]bool)
 
@@ -1059,10 +1019,6 @@ func (s *Smart) cleanupOrphanedGroups() {
 }
 
 func (s *Smart) cleanupOrphanedNodeCache() {
-	if s.store == nil {
-		return
-	}
-
 	currentProxies := s.GetProxies(true)
 	currentNodesMap := make(map[string]bool)
 	for _, proxy := range currentProxies {
@@ -1095,7 +1051,7 @@ func (s *Smart) cleanupOrphanedNodeCache() {
 
 // 获取历史 connectTime
 func (s *Smart) getHistoryConnectStats(metadata *C.Metadata, proxy C.Proxy) (historyConnectTime int64) {
-	if s.store == nil || proxy == nil || metadata == nil {
+	if proxy == nil {
 		return 0
 	}
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
@@ -1134,8 +1090,8 @@ func (s *Smart) checkNodeQualityDegradation(
 	}
 
 	// 异常状态码检测
-	if (downloadTotal < 0.03 && metadata != nil && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP) ||
-		(rand.Float64() < 0.05 && metadata != nil && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP) {
+	if (downloadTotal < 0.03 && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP) ||
+		(rand.Float64() < 0.05 && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP) {
 		needTest := false
 		cooldownSeconds := int64(300)
 		now := time.Now().Unix()
@@ -1546,7 +1502,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	connectTime int64, latency int64, uploadTotal int64, downloadTotal int64, maxUploadRate int64, maxDownloadRate int64,
 	connectionDuration int64, fromLongConnProcess bool, err error) {
 
-	if s.store == nil || proxy == nil || metadata == nil {
+	if proxy == nil {
 		return
 	}
 
@@ -1777,7 +1733,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
-		if metadata != nil && metadata.UUID != "" {
+		if metadata.UUID != "" {
 			tracker := statistic.DefaultManager.Get(metadata.UUID)
 			if tracker != nil {
 				info := tracker.Info()
@@ -1797,7 +1753,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 
 func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
-		if metadata != nil && metadata.UUID != "" {
+		if metadata.UUID != "" {
 			tracker := statistic.DefaultManager.Get(metadata.UUID)
 			if tracker != nil {
 				info := tracker.Info()
@@ -1816,14 +1772,10 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 }
 
 func (s *Smart) processLongConnections(threshold time.Duration) {
-	if s.store == nil {
-		return
-	}
-
 	_, err, _ := longConnProcessGroup.Do(s.Name()+"-"+s.configName, func() (interface{}, error) {
 		statistic.DefaultManager.Range(func(t statistic.Tracker) bool {
 			info := t.Info()
-			if info == nil || info.Metadata == nil || info.Chain == nil || len(info.Chain) < 2 {
+			if info == nil || len(info.Chain) < 2 {
 				return true
 			}
 
@@ -1875,10 +1827,6 @@ func (s *Smart) processLongConnections(threshold time.Duration) {
 }
 
 func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain, addressDisplay string, nodeName string, currentWeight float64, weightType string, asnInfo string) {
-	if s.store == nil {
-		return
-	}
-
 	lock := smart.GetDomainNodeLock(domain, s.Name(), nodeName)
 	lock.Lock()
 	defer lock.Unlock()
@@ -2065,7 +2013,7 @@ func parseSmartOption(config map[string]any) ([]smartOption, string) {
 }
 
 func (s *Smart) getASNCode(metadata *C.Metadata) string {
-	if metadata == nil || !metadata.DstIP.IsValid() || metadata.DstIPASN == "unknown" {
+	if !metadata.DstIP.IsValid() || metadata.DstIPASN == "unknown" {
 		return ""
 	}
 
@@ -2092,7 +2040,7 @@ func (s *Smart) Close() error {
 
 	s.wg.Wait()
 
-	if s.store != nil && !flushQueueOnce.Swap(true) {
+	if !flushQueueOnce.Swap(true) {
 		s.store.FlushQueue(true)
 	}
 

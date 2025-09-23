@@ -145,8 +145,8 @@ type (
 	PrefetchMap map[string]NodeWithWeight
 )
 
-func InitializeGlobalParams() {
-	InitializeCache()
+func InitGlobalParams() {
+	InitCache()
 }
 
 // 格式化缓存键

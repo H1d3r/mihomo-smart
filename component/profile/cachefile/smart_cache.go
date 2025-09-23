@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	smartInitOnce sync.Once
-	smartStore    *smart.Store
+	smartInitMutex sync.Mutex
+	smartInitDone  bool
+	smartStore     *smart.Store
 )
 
 type SmartStore struct {
@@ -22,18 +23,26 @@ func NewSmartStore(cache *CacheFile) *SmartStore {
 		return nil
 	}
 
-	smartInitOnce.Do(func() {
+	smartInitMutex.Lock()
+	defer smartInitMutex.Unlock()
+
+	if !smartInitDone {
 		err := cache.DB.Update(func(tx *bbolt.Tx) error {
 			_, err := tx.CreateBucketIfNotExists(bucketSmartStats)
 			return err
 		})
 		if err != nil {
 			log.Warnln("[SmartStore] Failed to create bucket: %v", err)
-			return
+			return nil
 		}
-		smart.InitializeGlobalParams()
+		smart.InitGlobalParams()
 		smartStore = smart.NewStore(cache.DB)
-	})
+		smartInitDone = true
+	}
+
+	if smartStore == nil {
+		return nil
+	}
 
 	return &SmartStore{
 		store: smartStore,

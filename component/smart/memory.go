@@ -12,7 +12,7 @@ import (
 	"github.com/metacubex/mihomo/tunnel"
 )
 
-func InitializeCache() {
+func InitCache() {
 	globalCacheParams.mutex.Lock()
 	defer globalCacheParams.mutex.Unlock()
 

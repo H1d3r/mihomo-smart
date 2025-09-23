@@ -63,7 +63,7 @@ func GetCollector() *DataCollector {
 }
 
 func (c *DataCollector) AddSample(input *ModelInput, metadata *C.Metadata, actualWeight float64, weightSource string) {
-	if c == nil || metadata == nil || input == nil {
+	if c == nil || input == nil {
 		return
 	}
 
