@@ -1086,8 +1086,8 @@ func (s *Smart) checkNodeQualityDegradation(
 	// 零流量连接
 	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 {
 		degradedWeight := math.Max(0.1, newWeight*0.3)
-		log.Debugln("[Smart] Zero-traffic connection detected: [%s] for domain [%s], conn time: %dms, forcing weight degradation from %.4f to %.4f (%s)",
-			proxyName, addressDisplay, connectionDuration, newWeight, degradedWeight, weightType)
+		log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected zero-traffic, degrade weight from %.4f to %.4f",
+			s.Name(), proxyName, weightType, addressDisplay, newWeight, degradedWeight)
 		return degradedWeight, true
 	}
 
@@ -1180,10 +1180,9 @@ func (s *Smart) checkNodeQualityDegradation(
 
 				limitedWeight := math.Max(newWeight, oldWeight*adjustmentFactor)
 
-				log.Debugln("[Smart] Node quality degraded: [%s] for domain [%s], "+
-					"weight from %.4f to %.4f (%.1f%%), limited to %.4f (%s)",
-					proxyName, addressDisplay, oldWeight, newWeight, weightChangeRatio*100,
-					limitedWeight, weightType)
+				log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected node quality, degrade weight from %.4f to %.4f (%.1f%%), limited to %.4f",
+					s.Name(), proxyName, weightType, addressDisplay,
+					oldWeight, newWeight, weightChangeRatio*100, limitedWeight)
 
 				return limitedWeight, true
 			}
@@ -1682,8 +1681,8 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		if metadata.SmartBlock == "blocked" {
 			degradedWeight = math.Max(0.1, calculatedWeight*0.3)
 			isDegraded = true
-			log.Debugln("[Smart] SmartBlock triggered: [%s] for domain [%s], forcing weight degradation from %.4f to %.4f (%s)",
-				proxy.Name(), addressDisplay, calculatedWeight, degradedWeight, weightType)
+			log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected manual block, degrade weight from %.4f to %.4f",
+				s.Name(), proxy.Name(), weightType, addressDisplay, calculatedWeight, degradedWeight)
 		} else if needCheckQuality {
 			historyMaxUploadRateKB := atomicRecord.Get("maxUploadRate").(float64)
 			historyMaxDownloadRateKB := atomicRecord.Get("maxDownloadRate").(float64)
