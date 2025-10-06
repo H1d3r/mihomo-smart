@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/common/lru"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
 	"golang.org/x/net/publicsuffix"
@@ -27,22 +28,22 @@ const (
 )
 
 const (
-	KeyTypePrefetch = "prefetch"
-	KeyTypeFailed   = "failed"
-	KeyTypeNode     = "node"
-	KeyTypeStats    = "stats"
-	KeyTypeRanking  = "ranking"
+	KeyTypePrefetch         = "prefetch"
+	KeyTypeFailed           = "failed"
+	KeyTypeNode             = "node"
+	KeyTypeStats            = "stats"
+	KeyTypeRanking          = "ranking"
 
-	WeightTypeTCP    = "tcp"
-	WeightTypeUDP    = "udp"
-	WeightTypeTCPASN = "tcp_asn"
-	WeightTypeUDPASN = "udp_asn"
+	WeightTypeTCP           = "tcp"
+	WeightTypeUDP           = "udp"
+	WeightTypeTCPASN        = "tcp_asn"
+	WeightTypeUDPASN        = "udp_asn"
 )
 
 const (
-	DefaultMinSampleCount = 2
-	RetentionPeriod       = 7 * 24 * time.Hour
-	CacheMaxAge           = 21600
+	DefaultMinSampleCount   = 2
+	RetentionPeriod         = 7 * 24 * time.Hour
+	CacheMaxAge             = 21600
 
 	MaxDomainsLimit         = 2000
 	MinDomainsLimit         = 300
@@ -51,14 +52,14 @@ const (
 	MaxPrefetchDomainsLimit = 1000
 	MinPrefetchDomainsLimit = 100
 
-	MemoryDomainsFactor   = 0.8
-	MemoryCacheSizeFactor = 0.7
-	MemoryBatchFactor     = 0.7
-	MemoryPrefetchFactor  = 0.7
+	MemoryDomainsFactor     = 0.8
+	MemoryCacheSizeFactor   = 0.7
+	MemoryBatchFactor       = 0.7
+	MemoryPrefetchFactor    = 0.7
 
-	RankMostUsed   = "MostUsed"
-	RankOccasional = "OccasionalUsed"
-	RankRarelyUsed = "RarelyUsed"
+	RankMostUsed            = "MostUsed"
+	RankOccasional          = "OccasionalUsed"
+	RankRarelyUsed          = "RarelyUsed"
 )
 
 type StoreOperationType int
@@ -93,7 +94,7 @@ var (
 
 	nodeStatesCache *lru.LruCache[string, map[string][]byte]
 
-	unwrapCache *lru.LruCache[string, []string]
+	unwrapCache *lru.LruCache[string, []C.Proxy]
 )
 
 type (
@@ -180,10 +181,7 @@ func GetEffectiveDomain(host string, dstIP string) (string, string) {
 	rawHost := host
 
 	if host == "" {
-		if dstIP != "" {
-			return dstIP, dstIP
-		}
-		return "", ""
+		return dstIP, dstIP
 	}
 
 	h := strings.ToLower(host)

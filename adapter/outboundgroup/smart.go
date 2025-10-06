@@ -40,14 +40,16 @@ const (
 	flushQueueInterval       = 300 * time.Second
 	rankingInterval          = 60 * time.Minute
 
-	failureRecovery5min  = 5 * time.Minute
-	failureRecovery10min = 10 * time.Minute
-	failureRecovery15min = 15 * time.Minute
-	failureRecovery30min = 30 * time.Minute
+	failureRecovery5min      = 5 * time.Minute
+	failureRecovery10min     = 10 * time.Minute
+	failureRecovery15min     = 15 * time.Minute
+	failureRecovery30min     = 30 * time.Minute
 
-	longConnThreshold = 10 * time.Minute
+	longConnThreshold        = 10 * time.Minute
 
-	maxRetries              = 3
+	maxRetries               = 3
+	maxSelected              = 9
+	allowedWeight            = 0.4
 )
 
 var (
@@ -133,7 +135,7 @@ func getConfigFilename() string {
 	return filename
 }
 
-func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, options ...smartOption) (*Smart, error) {
+func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, strategy string, config map[string]any, options ...smartOption) (*Smart, error) {
 	if strategy != "round-robin" && strategy != "sticky-sessions" {
 		return nil, fmt.Errorf("%w: %s", errStrategy, strategy)
 	}
@@ -186,6 +188,8 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, str
 	for _, option := range options {
 		option(s)
 	}
+
+	s.InitCache(config)
 
 	return s, nil
 }
@@ -489,13 +493,7 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 
 	proxies = s.selectProxies(metadata, proxies)
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		names := make([]string, 0, len(proxies))
-		for _, p := range proxies {
-			names = append(names, p.Name())
-		}
-		s.store.StoreUnwrapResult(s.Name(), s.configName, domain, names)
-	}
+	s.store.StoreUnwrapResult(s.Name(), s.configName, domain, proxies)
 
 	return proxies[0]
 }
@@ -572,7 +570,7 @@ func (s *Smart) Now() string {
 	return "Smart - Select"
 }
 
-func (s *Smart) InitCache() {
+func (s *Smart) InitCache(config map[string]any) {
 	cacheFile := cachefile.Cache()
 	if cacheFile == nil || cacheFile.DB == nil {
 		log.Fatalln("[Smart] DB Cache file is nil for group %s", s.Name())
@@ -605,12 +603,7 @@ func (s *Smart) InitCache() {
 		preloadOnce.Do(func() {
 			s.store.AdjustCacheParameters()
 		})
-		proxies := s.GetProxies(false)
-		proxyNames := make([]string, 0, len(proxies))
-		for _, p := range proxies {
-			proxyNames = append(proxyNames, p.Name())
-		}
-		s.store.PreloadFrequentData(s.Name(), s.configName, proxyNames)
+		s.store.PreloadFrequentData(s.Name(), s.configName)
 	}, true)
 	s.startTimedTask(5*time.Minute, prefetchInterval, "prefetch", s.runPrefetch, false)
 	s.startTimedTask(30*time.Second, rankingInterval, "ranking", s.updateNodeRanking, false)
@@ -630,7 +623,7 @@ func (s *Smart) InitCache() {
 	}
 
 	if s.collectData {
-		s.dataCollector = lightgbm.GetCollector()
+		s.dataCollector = lightgbm.GetCollector(config)
 
 		s.startTimedTask(10*time.Minute, 30*time.Minute, "Flush data collector", func() {
 			if s.dataCollector != nil {
@@ -645,6 +638,14 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 	go func() {
 		defer s.wg.Done()
 
+		for tunnel.Status() != tunnel.Running {
+			select {
+			case <-time.After(100 * time.Millisecond):
+			case <-s.ctx.Done():
+				return
+			}
+		}
+
 		jitterRange := 30.0
 		intervalJitter := time.Duration(rand.Float64() * jitterRange * float64(time.Second))
 
@@ -657,7 +658,9 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 			return
 		}
 
-		task()
+		if tunnel.Status() == tunnel.Running {
+			task()
+		}
 
 		if runOnce {
 			log.Debugln("[Smart] Task %s for group [%s] set to run once, exiting",
@@ -671,7 +674,9 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 		for {
 			select {
 			case <-ticker.C:
-				task()
+				if tunnel.Status() == tunnel.Running {
+					task()
+				}
 			case <-s.ctx.Done():
 				return
 			}
@@ -698,7 +703,7 @@ func (s *Smart) updateNodeRanking() {
 	for _, p := range proxies {
 		proxyNames = append(proxyNames, p.Name())
 	}
-	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, false, proxyNames)
+	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, proxyNames)
 	if err != nil {
 		log.Warnln("[Smart] Failed to update node ranking: %v", err)
 		return
@@ -861,8 +866,8 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 	fallbacks = append(fallbacks, proxies[piv:]...)
 	fallbacks = append(fallbacks, proxies[:piv]...)
 
-	if len(fallbacks) > 9 {
-		fallbacks = fallbacks[:9]
+	if len(fallbacks) > maxSelected {
+		fallbacks = fallbacks[:maxSelected]
 	}
 
 	return fallbacks
@@ -910,21 +915,39 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return proxies
 	}
 
-	fillProxies := func(selected []C.Proxy, all []C.Proxy, minCount int) []C.Proxy {
+	fillProxies := func(selected []C.Proxy, weights map[string]float64, all []C.Proxy, minCount int) []C.Proxy {
+		filtered := make([]C.Proxy, 0, len(selected))
+		for _, p := range selected {
+			if weights == nil || weights[p.Name()] >= allowedWeight {
+				filtered = append(filtered, p)
+			}
+		}
+		selected = filtered
+
 		if len(selected) >= minCount {
-			return selected
+			return selected[:minCount]
 		}
 		if len(all) == len(selected) {
 			return selected
 		}
-		selectedNames := make(map[string]struct{}, len(selected))
+
+		selectedNames := make(map[string]bool, len(selected))
 		for _, p := range selected {
-			selectedNames[p.Name()] = struct{}{}
+			selectedNames[p.Name()] = true
 		}
+
 		remain := make([]C.Proxy, 0)
+		fallbackProxy := s.fallback.Unwrap(metadata, true)
 		for _, p := range all {
-			if _, exists := selectedNames[p.Name()]; !exists {
-				remain = append(remain, p)
+			if !blockedNodes[p.Name()] && !selectedNames[p.Name()] {
+				if w, exists := weights[p.Name()]; weights == nil || (exists && w >= allowedWeight) || !exists {
+					if fallbackProxy.Name() == p.Name() {
+						selected = append([]C.Proxy{fallbackProxy}, selected...)
+						selectedNames[fallbackProxy.Name()] = true
+						continue
+					}
+					remain = append(remain, p)
+				}
 			}
 		}
 		rand.Shuffle(len(remain), func(i, j int) {
@@ -939,30 +962,40 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		return selected
 	}
 
-	trySelector := func(target string, weightType string) []C.Proxy {
+	trySelector := func(target string, weightType string) ([]C.Proxy, map[string]float64) {
 		// 检查解析缓存
-		if cachedProxyNames := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxyNames) != 0 {
-			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				return proxies
-			}
-		}
+		if cachedProxies := s.store.GetUnwrapResult(s.Name(), s.configName, target); len(cachedProxies) > 0 {
+            return cachedProxies, nil
+        }
 
 		// 检查预解析缓存
-		if cachedProxyNames, _ := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
+		if cachedProxyNames, cachedWeights := s.store.GetPrefetchResult(s.Name(), s.configName, target, weightType); len(cachedProxyNames) != 0 {
 			if proxies := findProxiesByNames(cachedProxyNames); len(proxies) > 0 {
-				return proxies
+				weights := make(map[string]float64)
+				for i, name := range cachedProxyNames {
+					if i < len(cachedWeights) {
+						weights[name] = cachedWeights[i]
+					}
+				}
+				return proxies, weights
 			}
 		}
 
 		// 实时计算最佳节点
-		bestNodes, _, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType)
+		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, target, weightType)
 		if err == nil && len(bestNodes) != 0 {
 			if proxies := findProxiesByNames(bestNodes); len(proxies) > 0 {
-				return proxies
+				weights := make(map[string]float64)
+				for i, name := range bestNodes {
+					if i < len(bestWeights) {
+						weights[name] = bestWeights[i]
+					}
+				}
+				return proxies, weights
 			}
 		}
 
-		return nil
+		return nil, nil
 	}
 
 	// 尝试使用ASN信息选择
@@ -976,17 +1009,19 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 				asnWeightType = smart.WeightTypeUDPASN + ":" + asnNumber
 			}
 
-			if selected := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
-				return fillProxies(selected, proxies, 9)
+			if selected, weights := trySelector(asnNumber, asnWeightType); len(selected) > 0 {
+				if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+					return result
+				}
 			}
 		}
 	}
 
 	// 尝试使用域名信息选择
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain != "" {
-		if selected := trySelector(domain, weightType); len(selected) > 0 {
-			return fillProxies(selected, proxies, 9)
+	if selected, weights := trySelector(domain, weightType); len(selected) > 0 {
+		if result := fillProxies(selected, weights, proxies, maxSelected); len(result) > 0 {
+			return result
 		}
 	}
 
@@ -1095,9 +1130,6 @@ func (s *Smart) getHistoryConnectStats(metadata *C.Metadata, proxy C.Proxy) (his
 		return 0
 	}
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return 0
-	}
 	cacheKey := smart.FormatCacheKey(smart.KeyTypeStats, s.configName, s.Name(), domain, proxy.Name())
 	atomicManager := smart.GetAtomicManager()
 	if atomicManager == nil {
@@ -1544,10 +1576,6 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 	}
 
 	domain, rawDomain := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return
-	}
-
 	addressDisplay := rawDomain
 	if rawDomain != "" && domain != "" && rawDomain != domain {
 		addressDisplay = fmt.Sprintf("%s (Wildcard: %s)", rawDomain, domain)
@@ -1877,6 +1905,7 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 
 	// 处理域名相关缓存
 	bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, domain, weightType)
+
 	var i int
 	for i = 0; i < len(bestNodes); i++ {
 		if bestNodes[i] != "" && bestNodes[i] != nodeName {
@@ -1911,6 +1940,7 @@ func (s *Smart) cleanupDegradedNodePreferenceCache(metadata *C.Metadata, domain,
 		s.store.DeleteCacheResult(smart.KeyTypePrefetch, s.configName, s.Name(), asnInfo, "")
 
 		bestNodes, bestWeights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, asnInfo, fullAsnWeightType)
+
 		var i int
 		for i = 0; i < len(bestNodes); i++ {
 			if bestNodes[i] != "" && bestNodes[i] != nodeName {

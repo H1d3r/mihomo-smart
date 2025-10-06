@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/lru"
-	"github.com/metacubex/mihomo/constant"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
@@ -47,9 +47,9 @@ func InitCache() {
 		lru.WithAge[string, map[string][]byte](120),
 	)
 
-	unwrapCache = lru.New[string, []string](
-		lru.WithSize[string, []string](500),
-		lru.WithAge[string, []string](2),
+	unwrapCache = lru.New[string, []C.Proxy](
+		lru.WithSize[string, []C.Proxy](500),
+		lru.WithAge[string, []C.Proxy](2),
 	)
 }
 
@@ -249,16 +249,16 @@ func (s *Store) LoadAllPrefetchResults(group, config string, limit int) int {
 	return loadCount
 }
 
-func (s *Store) StoreUnwrapResult(group, config string, target string, proxyNames []string) {
-	if target == "" || len(proxyNames) == 0 {
+func (s *Store) StoreUnwrapResult(group, config string, target string, proxies []C.Proxy) {
+	if target == "" || len(proxies) == 0 {
 		return
 	}
 
 	key := fmt.Sprintf("%s:%s:%s", config, group, target)
-	unwrapCache.Set(key, proxyNames)
+	unwrapCache.Set(key, proxies)
 }
 
-func (s *Store) GetUnwrapResult(group, config string, target string) []string {
+func (s *Store) GetUnwrapResult(group, config string, target string) []C.Proxy {
 	if target == "" {
 		return nil
 	}
@@ -305,7 +305,7 @@ func (s *Store) AdjustCacheParameters() {
 
 	smartGroupCount := 0
 	for _, proxy := range tunnel.Proxies() {
-		if proxy.Type() == constant.Smart {
+		if proxy.Type() == C.Smart {
 			smartGroupCount++
 		}
 	}
@@ -387,10 +387,10 @@ func (s *Store) AdjustCacheParameters() {
 		lru.WithAge[string, map[string][]byte](120),
 	)
 
-	unwrapCache = lru.New[string, []string](
-        lru.WithSize[string, []string](500),
-        lru.WithAge[string, []string](2),
-    )
+	unwrapCache = lru.New[string, []C.Proxy](
+		lru.WithSize[string, []C.Proxy](500),
+		lru.WithAge[string, []C.Proxy](2),
+	)
 
 	var entries map[string]interface{}
 	var preserveRatio float64
@@ -463,7 +463,7 @@ func (s *Store) AdjustCacheParameters() {
 }
 
 // 预加载数据
-func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
+func (s *Store) PreloadFrequentData(group, config string) {
 	log.Infoln("[SmartStore] Starting data preloading for group [%s], config [%s]", group, config)
 
 	globalCacheParams.mutex.RLock()
@@ -481,7 +481,7 @@ func (s *Store) PreloadFrequentData(group, config string, proxies []string) {
 		nodeStatesCount = len(stateData)
 	}
 
-	ranking, _ := s.GetNodeWeightRanking(group, config, true, proxies)
+	ranking, _ := s.GetNodeWeightRankingCache(group, config)
 
 	domains := s.GetActiveDomains(group, config, domainLimit)
 

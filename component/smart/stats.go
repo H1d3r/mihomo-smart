@@ -282,42 +282,42 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 }
 
 // 获取节点权重排名
-func (s *Store) GetNodeWeightRanking(group, config string, onlyCache bool, proxies []string) (map[string]string, error) {
-	if onlyCache {
-		cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
-		cachedData, ok := GetCacheValue(cacheKey)
-		if ok {
-			switch v := cachedData.(type) {
-			case []byte:
-				if len(v) > 0 {
-					var rankingData RankingData
-					if json.Unmarshal(v, &rankingData) == nil && len(rankingData.Ranking) > 0 {
-						return rankingData.Ranking, nil
-					}
-				}
-			case RankingData:
-				if len(v.Ranking) > 0 {
-					return v.Ranking, nil
-				}
-			case map[string]string:
-				if len(v) > 0 {
-					return v, nil
+func (s *Store) GetNodeWeightRankingCache(group, config string) (map[string]string, error) {
+	cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
+	cachedData, ok := GetCacheValue(cacheKey)
+	if ok {
+		switch v := cachedData.(type) {
+		case []byte:
+			if len(v) > 0 {
+				var rankingData RankingData
+				if json.Unmarshal(v, &rankingData) == nil && len(rankingData.Ranking) > 0 {
+					return rankingData.Ranking, nil
 				}
 			}
-		}
-
-		dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
-		data, err := s.DBViewGetItem(dbKey)
-		if err == nil && data != nil {
-			var rankingData RankingData
-			if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
-				return rankingData.Ranking, nil
+		case RankingData:
+			if len(v.Ranking) > 0 {
+				return v.Ranking, nil
+			}
+		case map[string]string:
+			if len(v) > 0 {
+				return v, nil
 			}
 		}
-
-		return make(map[string]string), nil
 	}
 
+	dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
+	data, err := s.DBViewGetItem(dbKey)
+	if err == nil && data != nil {
+		var rankingData RankingData
+		if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
+			return rankingData.Ranking, nil
+		}
+	}
+
+	return make(map[string]string), nil
+}
+
+func (s *Store) GetNodeWeightRanking(group, config string, proxies []string) (map[string]string, error) {
 	var allNodes []string
 	if len(proxies) > 0 {
 		allNodes = proxies
@@ -612,7 +612,6 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 	}
 
 	nodeStatesMap := make(map[string]NodeState)
-	allAvailableNodes := make([]string, 0)
 	stateData, _ := s.GetNodeStates(group, config)
 	for nodeName, data := range stateData {
 		var state NodeState
@@ -621,10 +620,8 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 				continue
 			}
 			nodeStatesMap[nodeName] = state
-			allAvailableNodes = append(allAvailableNodes, nodeName)
 		}
 	}
-	availableNodesCount := len(allAvailableNodes)
 
 	nodesWithWeight := make(map[string]float64)
 	asnMode := strings.HasPrefix(weightType, WeightTypeTCPASN) || strings.HasPrefix(weightType, WeightTypeUDPASN)
@@ -689,126 +686,13 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 		}
 	}
 
-	var requiredNodeCount int
-
-	baseCount := func() int {
-		switch {
-		case availableNodesCount <= 5:
-			return 2
-		case availableNodesCount <= 10:
-			return 4
-		case availableNodesCount <= 20:
-			return 6
-		case availableNodesCount <= 50:
-			return 8
-		default:
-			return 10
-		}
-	}()
-
-	coverageRatio := 0.0
-
-	if availableNodesCount > 0 {
-		coverageRatio = float64(len(nodesWithWeight)) / float64(availableNodesCount)
-	}
-
-	switch {
-	case coverageRatio >= 0.6:
-		requiredNodeCount = baseCount
-		if requiredNodeCount > 2 {
-			requiredNodeCount = (requiredNodeCount * 3) / 4
-		}
-	case coverageRatio >= 0.3:
-		requiredNodeCount = baseCount
-	case coverageRatio >= 0.1:
-		requiredNodeCount = baseCount + 1
-		if requiredNodeCount < 2 {
-			requiredNodeCount = 2
-		}
-	default:
-		requiredNodeCount = baseCount + 2
-		if requiredNodeCount < 3 {
-			requiredNodeCount = 3
-		}
-		if requiredNodeCount > availableNodesCount/2 {
-			requiredNodeCount = availableNodesCount / 2
-			if requiredNodeCount < 1 {
-				requiredNodeCount = 1
-			}
-		}
-	}
-
-	if len(nodesWithWeight) >= 3 {
-		var maxWeight, minWeight float64
-		first := true
-		for _, weight := range nodesWithWeight {
-			if first {
-				maxWeight = weight
-				minWeight = weight
-				first = false
-			} else {
-				if weight > maxWeight {
-					maxWeight = weight
-				}
-				if weight < minWeight {
-					minWeight = weight
-				}
-			}
-		}
-
-		if maxWeight > 0 && minWeight > 0 {
-			ratio := maxWeight / minWeight
-			switch {
-			case ratio >= 4.0:
-				requiredNodeCount = (requiredNodeCount * 2) / 3
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			case ratio >= 2.0:
-				requiredNodeCount = (requiredNodeCount * 4) / 5
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			case ratio >= 1.5:
-				requiredNodeCount = requiredNodeCount
-			case ratio < 1.3:
-				requiredNodeCount = requiredNodeCount + 1
-			}
-			if maxWeight < 0.8 {
-				requiredNodeCount = (requiredNodeCount * 3) / 4
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			}
-			if maxWeight > 2.5 && ratio >= 1.8 {
-				requiredNodeCount = (requiredNodeCount * 3) / 4
-				if requiredNodeCount < 1 {
-					requiredNodeCount = 1
-				}
-			}
-		}
-	}
-
-	if requiredNodeCount > availableNodesCount/2 {
-		requiredNodeCount = availableNodesCount / 2
-		if requiredNodeCount < 1 {
-			requiredNodeCount = 1
-		}
-	}
-
-	if availableNodesCount > 1 && requiredNodeCount < 2 {
-		requiredNodeCount = 2
-	}
-
 	type nodeWeight struct {
 		name   string
 		weight float64
 	}
 	var nodeList []nodeWeight
 	for node, weight := range nodesWithWeight {
-		if weight >= 0.4 {
-			nodeList = append(nodeList, nodeWeight{node, weight})
-		}
+		nodeList = append(nodeList, nodeWeight{node, weight})
 	}
 
 	if len(nodeList) == 0 {
@@ -819,13 +703,9 @@ func (s *Store) GetBestProxyForTarget(group, config string, target string, weigh
 		return nodeList[i].weight > nodeList[j].weight
 	})
 
-	if len(nodeList) < requiredNodeCount {
-		return nil, nil, errors.New("not enough nodes with valid weights")
-	}
-
 	var bestNodes []string
 	var bestWeights []float64
-	for i := 0; i < len(nodeList) && i < 9; i++ {
+	for i := 0; i < len(nodeList); i++ {
 		bestNodes = append(bestNodes, nodeList[i].name)
 		bestWeights = append(bestWeights, nodeList[i].weight)
 	}
@@ -1705,10 +1585,6 @@ func (s *Store) clearThrottlePrefix(prefix string) {
 
 func (s *Store) MarkConnectionFailed(group, config string, proxiesCount int, triedProxies map[string]bool, metadata *C.Metadata) {
 	domain, _ := GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
-	if domain == "" {
-		return
-	}
-	
 	n := &s.networkFailureManager
 	groupKey := fmt.Sprintf("%s:%s", group, config)
 	now := time.Now()
