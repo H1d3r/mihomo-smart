@@ -55,7 +55,7 @@ const (
 var (
 	longConnProcessGroup singleflight.Group[interface{}]
 	flushQueueOnce       atomic.Bool
-	smartInitOnce        sync.Once
+	taskInitOnce         sync.Once
 	preloadOnce          sync.Once
 	asnAvailable         bool
 )
@@ -189,7 +189,7 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, str
 		option(s)
 	}
 
-	s.InitCache(config)
+	s.InitSmart(config)
 
 	return s, nil
 }
@@ -570,7 +570,7 @@ func (s *Smart) Now() string {
 	return "Smart - Select"
 }
 
-func (s *Smart) InitCache(config map[string]any) {
+func (s *Smart) InitSmart(config map[string]any) {
 	cacheFile := cachefile.Cache()
 	if cacheFile == nil || cacheFile.DB == nil {
 		log.Fatalln("[Smart] DB Cache file is nil for group %s", s.Name())
@@ -589,7 +589,7 @@ func (s *Smart) InitCache(config map[string]any) {
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
-	smartInitOnce.Do(func() {
+	taskInitOnce.Do(func() {
 		s.startTimedTask(5*time.Minute, checkInterval, "Clean up groups", s.cleanupOrphanedGroups, true)
 		s.startTimedTask(5*time.Minute, cacheParamAdjustInterval, "Cache parameter adjustment", s.store.AdjustCacheParameters, false)
 		s.startTimedTask(5*time.Minute, flushQueueInterval, "Queue flush", func() {
@@ -2118,7 +2118,7 @@ func (s *Smart) Close() error {
 
 	lightgbm.CloseAllCollectors()
 
-	smartInitOnce = sync.Once{}
+	taskInitOnce = sync.Once{}
 	preloadOnce = sync.Once{}
 
 	return nil

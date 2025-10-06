@@ -96,6 +96,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 		}
 	}
 
+	closeSmart()
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
