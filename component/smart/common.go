@@ -45,7 +45,7 @@ const (
 	RetentionPeriod         = 7 * 24 * time.Hour
 	CacheMaxAge             = 21600
 
-	MaxDomainsLimit         = 2000
+	MaxDomainsLimit         = 4000
 	MinDomainsLimit         = 300
 	MaxBatchThreshLimit     = 500
 	MinBatchThreshLimit     = 100
@@ -95,6 +95,8 @@ var (
 	nodeStatesCache *lru.LruCache[string, map[string][]byte]
 
 	unwrapCache *lru.LruCache[string, []C.Proxy]
+
+	recordCache *lru.LruCache[string, *AtomicStatsRecord]
 )
 
 type (
@@ -105,13 +107,6 @@ type (
 		Domain string
 		Node   string
 		Data   []byte
-	}
-
-	DomainRecord struct {
-		Key      string    `json:"key"`
-		NodeName string    `json:"node_name"`
-		Domain   string    `json:"domain"`
-		LastUsed time.Time `json:"last_used"`
 	}
 
 	StatsRecord struct {

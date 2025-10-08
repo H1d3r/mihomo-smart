@@ -51,6 +51,11 @@ func InitCache() {
 		lru.WithSize[string, []C.Proxy](500),
 		lru.WithAge[string, []C.Proxy](2),
 	)
+
+	recordCache = lru.New[string, *AtomicStatsRecord](
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxDomains / 2),
+		lru.WithAge[string, *AtomicStatsRecord](CacheMaxAge),
+	)
 }
 
 // 从全局缓存获取值
@@ -159,33 +164,15 @@ func (s *Store) GetPrefetchResult(group, config string, target string, weightTyp
 		}
 	}
 
-	cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
-	if value, ok := GetCacheValue(cacheKey); ok {
-		switch v := value.(type) {
-		case PrefetchMap:
-			if res, exists := v[weightType]; exists {
-				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-					return res.Nodes, res.Weights
-				}
-			}
-		case []byte:
-			var pm PrefetchMap
-			if json.Unmarshal(v, &pm) == nil {
-				if res, exists := pm[weightType]; exists {
-					if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
-						return res.Nodes, res.Weights
-					}
-				}
-			}
-		}
+	pathPrefix := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
+	rawResult, err := s.GetSubBytesByPath(pathPrefix)
+	if err != nil {
+		return nil, nil
 	}
 
-	dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
-	data, err := s.DBViewGetItem(dbKey)
-	if err == nil && data != nil {
+	for _, data := range rawResult {
 		var prefetchMap PrefetchMap
-		if err = json.Unmarshal(data, &prefetchMap); err == nil {
-			SetCacheValue(cacheKey, data)
+		if err := json.Unmarshal(data, &prefetchMap); err == nil {
 			if res, exists := prefetchMap[weightType]; exists {
 				if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
 					return res.Nodes, res.Weights
@@ -392,6 +379,11 @@ func (s *Store) AdjustCacheParameters() {
 		lru.WithAge[string, []C.Proxy](2),
 	)
 
+	recordCache = lru.New[string, *AtomicStatsRecord](
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxDomains / 2),
+		lru.WithAge[string, *AtomicStatsRecord](CacheMaxAge),
+	)
+
 	var entries map[string]interface{}
 	var preserveRatio float64
 
@@ -514,6 +506,8 @@ func ClearCacheByLevel(level string, config string, group string) {
 	nodeStatesCache.Clear()
 
 	unwrapCache.Clear()
+
+	recordCache.Clear()
 }
 
 // 从数据库路径提取缓存键

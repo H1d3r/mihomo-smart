@@ -24,29 +24,21 @@ var (
 	shardedLocksOnce sync.Once
 )
 
-var (
-	globalAtomicManager *AtomicRecordManager
-	atomicManagerOnce   sync.Once
-)
-
 type AtomicStatsRecord struct {
-	success     atomic.Int64
-	failure     atomic.Int64
-	connectTime atomic.Int64
-	latency     atomic.Int64
-	lastUsed    atomic.Int64
-	status      atomic.Int64
+	success         atomic.Int64
+	failure         atomic.Int64
+	connectTime     atomic.Int64
+	latency         atomic.Int64
+	lastUsed        atomic.Int64
+	status          atomic.Int64
 
-	weights         atomic.TypedValue[map[string]float64]
 	uploadTotal     *atomic.Float64
 	downloadTotal   *atomic.Float64
 	duration        *atomic.Float64
 	maxUploadRate   *atomic.Float64
 	maxDownloadRate *atomic.Float64
-}
 
-type AtomicRecordManager struct {
-	records sync.Map
+	weights         atomic.TypedValue[map[string]float64]
 }
 
 type domainLastUsed struct {
@@ -55,16 +47,17 @@ type domainLastUsed struct {
 	types    []string
 }
 
-type domainMinHeap []domainLastUsed
-
 type asnLastUsed struct {
 	asn      string
 	lastUsed time.Time
 	types    []string
 }
 
+type domainMinHeap []domainLastUsed
+
 type asnMinHeap []asnLastUsed
 
+// 域名节点锁
 func initShardedLocks() {
 	shardedLocksOnce.Do(func() {
 		for i := range shardedLocks {
@@ -73,7 +66,6 @@ func initShardedLocks() {
 	})
 }
 
-// 域名节点锁
 func GetDomainNodeLock(domain, group, proxyName string) *sync.RWMutex {
 	initShardedLocks()
 
@@ -86,17 +78,10 @@ func GetDomainNodeLock(domain, group, proxyName string) *sync.RWMutex {
 	return shardedLocks[hash&1023]
 }
 
-func GetAtomicManager() *AtomicRecordManager {
-	atomicManagerOnce.Do(func() {
-		globalAtomicManager = &AtomicRecordManager{}
-	})
-	return globalAtomicManager
-}
-
 // 获取或创建原子记录
-func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *Store, groupName, configName, domain, proxyName string) *AtomicStatsRecord {
-	if value, ok := m.records.Load(cacheKey); ok {
-		return value.(*AtomicStatsRecord)
+func (s *Store) GetOrCreateAtomicRecord(cacheKey string, groupName, configName, domain, proxyName string) *AtomicStatsRecord {
+	if value, ok := recordCache.Get(cacheKey); ok {
+		return value
 	}
 
 	record := &AtomicStatsRecord{
@@ -110,7 +95,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 	record.lastUsed.Store(time.Now().Unix())
 	record.status.Store(0)
 
-	if existingData, err := store.GetStatsForDomain(groupName, configName, domain); err == nil {
+	if existingData, err := s.GetStatsForDomain(groupName, configName, domain, proxyName); err == nil {
 		if data, exists := existingData[proxyName]; exists {
 			var existingRecord StatsRecord
 			if json.Unmarshal(data, &existingRecord) == nil {
@@ -129,11 +114,7 @@ func (m *AtomicRecordManager) GetOrCreateAtomicRecord(cacheKey string, store *St
 		}
 	}
 
-	actual, loaded := m.records.LoadOrStore(cacheKey, record)
-	if loaded {
-		return actual.(*AtomicStatsRecord)
-	}
-
+	recordCache.Set(cacheKey, record)
 	return record
 }
 
@@ -283,33 +264,25 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 
 // 获取节点权重排名
 func (s *Store) GetNodeWeightRankingCache(group, config string) (map[string]string, error) {
-	cacheKey := FormatCacheKey(KeyTypeRanking, config, group, "")
-	cachedData, ok := GetCacheValue(cacheKey)
-	if ok {
-		switch v := cachedData.(type) {
-		case []byte:
-			if len(v) > 0 {
-				var rankingData RankingData
-				if json.Unmarshal(v, &rankingData) == nil && len(rankingData.Ranking) > 0 {
-					return rankingData.Ranking, nil
-				}
-			}
-		case RankingData:
-			if len(v.Ranking) > 0 {
-				return v.Ranking, nil
-			}
-		case map[string]string:
-			if len(v) > 0 {
-				return v, nil
+	ops := getGlobalQueueSnapshot()
+	for _, op := range ops {
+		if op.Type == OpSaveRanking && op.Group == group && op.Config == config {
+			var rankingData RankingData
+			if err := json.Unmarshal(op.Data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
+				return rankingData.Ranking, nil
 			}
 		}
 	}
 
-	dbKey := FormatDBKey("smart", KeyTypeRanking, config, group, "")
-	data, err := s.DBViewGetItem(dbKey)
-	if err == nil && data != nil {
+	pathPrefix := FormatDBKey("smart", KeyTypeRanking, config, group, "")
+	rawResult, err := s.GetSubBytesByPath(pathPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, data := range rawResult {
 		var rankingData RankingData
-		if json.Unmarshal(data, &rankingData) == nil && len(rankingData.Ranking) > 0 {
+		if err := json.Unmarshal(data, &rankingData); err == nil && len(rankingData.Ranking) > 0 {
 			return rankingData.Ranking, nil
 		}
 	}
@@ -1106,35 +1079,26 @@ func (s *Store) GetNodeStates(group, config string) (map[string][]byte, error) {
 }
 
 // 获取域名的统计数据
-func (s *Store) GetStatsForDomain(group, config, domain string) (map[string][]byte, error) {
-	result := make(map[string][]byte)
+func (s *Store) GetStatsForDomain(group, config, domain, proxyName string) (map[string][]byte, error) {
+    result := make(map[string][]byte)
 
-	ops := getGlobalQueueSnapshot()
-	for _, op := range ops {
-		if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain {
-			result[op.Node] = op.Data
-		}
-	}
+    ops := getGlobalQueueSnapshot()
+    for _, op := range ops {
+        if op.Type == OpSaveStats && op.Group == group && op.Config == config && op.Domain == domain && op.Node == proxyName {
+            result[proxyName] = op.Data
+            return result, nil
+        }
+    }
 
-	if len(result) > 0 {
-		return result, nil
-	}
+    pathKey := FormatDBKey("smart", KeyTypeStats, config, group, domain, proxyName)
+    rawResult, err := s.GetSubBytesByPath(pathKey)
+    if err != nil {
+        return nil, err
+    }
 
-	pathPrefix := FormatDBKey("smart", KeyTypeStats, config, group, domain, "")
-	rawResult, err := s.GetSubBytesByPath(pathPrefix)
-	if err != nil {
-		return nil, err
-	}
+    result[proxyName] = rawResult[pathKey]
 
-	for fullPath, data := range rawResult {
-		parts := strings.Split(fullPath, "/")
-		if len(parts) > 0 {
-			nodeName := parts[len(parts)-1]
-			result[nodeName] = data
-		}
-	}
-
-	return result, nil
+    return result, nil
 }
 
 // 获取所有统计数据
@@ -1175,37 +1139,6 @@ func (s *Store) GetAllStats(group, config string) (map[string]map[string][]byte,
 	}
 
 	return result, nil
-}
-
-// 获取所有域名记录
-func (s *Store) GetAllDomainRecords(group, config string) ([]DomainRecord, error) {
-	allStats, err := s.GetAllStats(group, config)
-	if err != nil {
-		return nil, err
-	}
-
-	var records []DomainRecord
-	for domain, nodeStats := range allStats {
-		for nodeName, data := range nodeStats {
-			var statsRecord StatsRecord
-			if err := json.Unmarshal(data, &statsRecord); err != nil {
-				continue
-			}
-
-			records = append(records, DomainRecord{
-				Key:      fmt.Sprintf("%s:%s:%s:%s", config, group, nodeName, domain),
-				Domain:   domain,
-				NodeName: nodeName,
-				LastUsed: statsRecord.LastUsed,
-			})
-		}
-	}
-
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].LastUsed.After(records[j].LastUsed)
-	})
-
-	return records, nil
 }
 
 // 删除域名记录
@@ -1479,14 +1412,30 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 
 // 清理旧的域名记录
 func (s *Store) CleanupOldDomains(group, config string) error {
-	domains := make(map[string]time.Time)
-	domainRecords, err := s.GetAllDomainRecords(group, config)
+	statsPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
+
+	globalCacheParams.mutex.RLock()
+	maxDomains := globalCacheParams.MaxDomains * 2
+	globalCacheParams.mutex.RUnlock()
+
+	statsData, err := s.DBViewPrefixScan(statsPrefix, -1)
 	if err != nil {
 		return err
 	}
-	for _, record := range domainRecords {
-		if lastUsed, exists := domains[record.Domain]; !exists || record.LastUsed.After(lastUsed) {
-			domains[record.Domain] = record.LastUsed
+
+	domainLastUsed := make(map[string]time.Time)
+	for path, data := range statsData {
+		parts := strings.Split(path, "/")
+		if len(parts) < 6 {
+			continue
+		}
+		domain := parts[len(parts)-2]
+		var statsRecord StatsRecord
+		if err := json.Unmarshal(data, &statsRecord); err != nil {
+			continue
+		}
+		if last, ok := domainLastUsed[domain]; !ok || statsRecord.LastUsed.After(last) {
+			domainLastUsed[domain] = statsRecord.LastUsed
 		}
 	}
 
@@ -1495,58 +1444,54 @@ func (s *Store) CleanupOldDomains(group, config string) error {
 		lastUsed time.Time
 	}
 	var domainList []domainInfo
-	for domain, lastUsed := range domains {
-		domainList = append(domainList, domainInfo{
-			domain:   domain,
-			lastUsed: lastUsed,
-		})
+	for domain, lastUsed := range domainLastUsed {
+		domainList = append(domainList, domainInfo{domain, lastUsed})
 	}
 	sort.Slice(domainList, func(i, j int) bool {
 		return domainList[i].lastUsed.Before(domainList[j].lastUsed)
 	})
 
-	globalCacheParams.mutex.RLock()
-	maxDomains := globalCacheParams.MaxDomains
-	globalCacheParams.mutex.RUnlock()
-	if maxDomains <= 0 {
-		maxDomains = MinDomainsLimit
+	if len(domainList) <= maxDomains {
+		return nil
 	}
-
-	if len(domainList) > maxDomains {
-		toDelete := domainList[:len(domainList)-maxDomains]
-
-		for _, info := range toDelete {
-			// 删除域名统计数据（缓存和DB）
-			err := s.DeleteDomainRecords(group, config, info.domain)
-			if err != nil {
-				log.Warnln("[SmartStore] Failed to delete domain [%s]: %v", info.domain, err)
-			}
-			// 同时清理预取结果（缓存和DB）
-			s.DeleteCacheResult(KeyTypePrefetch, config, group, info.domain, "")
+	toDelete := domainList[:len(domainList)-maxDomains]
+	for _, info := range toDelete {
+		err := s.DeleteDomainRecords(group, config, info.domain)
+		if err != nil {
+			log.Warnln("[SmartStore] Failed to delete domain [%s]: %v", info.domain, err)
 		}
-
-		log.Debugln("[SmartStore] Cleaned up [%d] old domain records, keeping the latest [%d] (group %s)",
-			len(toDelete), maxDomains, group)
+		s.DeleteCacheResult(KeyTypePrefetch, config, group, info.domain, "")
 	}
 
+	log.Debugln("[SmartStore] Cleaned up [%d] old domain records, keeping the latest [%d] (group %s)",
+		len(toDelete), maxDomains, group)
 	return nil
 }
 
 // 清理过期统计数据
 func (s *Store) CleanupExpiredStats(group, config string) error {
-	records, err := s.GetAllDomainRecords(group, config)
+	statsPrefix := FormatDBKey("smart", KeyTypeStats, config, group, "")
+	statsData, err := s.DBViewPrefixScan(statsPrefix, -1)
 	if err != nil {
 		return err
 	}
 
 	threshold := time.Now().Add(-RetentionPeriod)
 	var expiredDomains []string
-
 	domainLastUsed := make(map[string]time.Time)
-	for _, record := range records {
-		lastUsed, exists := domainLastUsed[record.Domain]
-		if !exists || record.LastUsed.After(lastUsed) {
-			domainLastUsed[record.Domain] = record.LastUsed
+
+	for path, data := range statsData {
+		parts := strings.Split(path, "/")
+		if len(parts) < 6 {
+			continue
+		}
+		domain := parts[len(parts)-2]
+		var statsRecord StatsRecord
+		if err := json.Unmarshal(data, &statsRecord); err != nil {
+			continue
+		}
+		if last, ok := domainLastUsed[domain]; !ok || statsRecord.LastUsed.After(last) {
+			domainLastUsed[domain] = statsRecord.LastUsed
 		}
 	}
 
