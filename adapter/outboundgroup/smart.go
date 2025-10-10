@@ -218,16 +218,16 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 		if ctx.Err() != nil {
 			return
 		}
-		
+
 		conn, connectTime, err := singleDialFunc(ctx, proxies[proxyIndex], metadata, start)
-		
+
 		result := dialResult{
 			proxyIndex:  proxyIndex,
 			conn:        conn,
 			connectTime: connectTime,
 			error:       err,
 		}
-		
+
 		select {
 		case results <- result:
 		case <-ctx.Done():
@@ -251,7 +251,7 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 				return proxies[res.proxyIndex], res.conn, res.connectTime, nil
 			}
 			errs = append(errs, res.error)
-			
+
 		case <-ctx.Done():
 			return nil, nil, 0, ctx.Err()
 		}
@@ -267,9 +267,11 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 	c, err = proxy.DialContext(ctx, metadata)
 	connectTime = time.Since(start).Milliseconds()
 
-	if err != nil && err != context.Canceled {
-		go s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
-		return nil, 0, err
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			go s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, err)
+		}
+		return nil, connectTime, err
 	}
 
 	return c, connectTime, nil
@@ -300,15 +302,14 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 			}
 		}
 		const thresholdRatio = 2.0
-		const dialTimeout = C.DefaultTCPTimeout / parallelDials * thresholdRatio
 		var timeout time.Duration
 		if historyConnectTime > 0 {
 			timeout = time.Duration(float64(historyConnectTime)*thresholdRatio) * time.Millisecond
-			if timeout > dialTimeout {
-				timeout = dialTimeout
+			if timeout > C.DefaultTCPTimeout {
+				timeout = C.DefaultTCPTimeout
 			}
 		} else {
-			timeout = dialTimeout
+			timeout = C.DefaultTCPTimeout
 		}
 		return batch, timeout
 	}
@@ -321,19 +322,19 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				jitterRange := 0.2
 				jitter := 1.0 + (rand.Float64()*2-1)*jitterRange
 				backoffDuration := time.Duration(float64(baseDelay) * jitter)
-				
+
 				select {
 				case <-time.After(backoffDuration):
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
 			}
-			
+
 			batch, timeout := getBatch(proxies, i)
 			if len(batch) == 0 {
 				break
 			}
-			
+
 			ctxDial, cancel := context.WithTimeout(ctx, timeout)
 			start := time.Now()
 			p, c, connectTime, err := s.ParallelDialContext(ctxDial, batch, metadata, start, s.singleDialContext)
@@ -447,11 +448,11 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		var timeout time.Duration
 		if historyConnectTime > 0 {
 			timeout = time.Duration(float64(historyConnectTime)*thresholdRatio) * time.Millisecond
-			if timeout > C.DefaultTCPTimeout {
-				timeout = C.DefaultTCPTimeout
+			if timeout > C.DefaultUDPTimeout {
+				timeout = C.DefaultUDPTimeout
 			}
 		} else {
-			timeout = C.DefaultTCPTimeout
+			timeout = C.DefaultUDPTimeout
 		}
 		ctxDial, cancel := context.WithTimeout(ctx, timeout)
 		start := time.Now()
@@ -461,12 +462,11 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 		if err == nil {
 			pc.AppendToChains(s)
-			go s.recordConnectionStats("success", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, false, nil)
-			pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata)
+			pc = s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime)
 			return pc, nil
 		}
 		finalErr = err
-		go s.recordConnectionStats("failed", metadata, proxy, 0, 0, 0, 0, 0, 0, 0, false, err)
+		go s.recordConnectionStats("failed", metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, err)
 		if s.selected != "" && len(availableProxies) == 1 && availableProxies[0].Name() == s.selected {
 			break
 		}
@@ -1107,13 +1107,10 @@ func (s *Smart) cleanupOrphanedNodeCache() {
 
 // 获取历史 connectTime
 func (s *Smart) getHistoryConnectStats(metadata *C.Metadata, proxy C.Proxy) (historyConnectTime int64) {
-	if proxy == nil {
-		return 0
-	}
 	domain, _ := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
 	cacheKey := smart.FormatCacheKey(smart.KeyTypeStats, s.configName, s.Name(), domain, proxy.Name())
 	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, domain, proxy.Name())
-	historyConnectTime, _ = atomicRecord.Get("connectTime").(int64)
+	historyConnectTime = atomicRecord.Get("connectTime").(int64)
 	return
 }
 
@@ -1258,30 +1255,6 @@ func (s *Smart) updateConnectionDuration(record *smart.AtomicStatsRecord, connec
 		record.Set("duration", (currentDuration+durationMinutes)/2.0)
 	} else {
 		record.Set("duration", durationMinutes)
-	}
-}
-
-// 统计数据限制检查
-func (s *Smart) checkAndLimitStats(record *smart.AtomicStatsRecord) {
-	success := record.Get("success").(int64)
-	failure := record.Get("failure").(int64)
-
-	if success > 10000 {
-		record.Set("success", success/2)
-	}
-
-	if failure > 10000 {
-		record.Set("failure", failure/2)
-	}
-
-	connectTime := record.Get("connectTime").(int64)
-	if connectTime > 60000 {
-		record.Set("connectTime", int64(60000))
-	}
-
-	latency := record.Get("latency").(int64)
-	if latency > 10000 {
-		record.Set("latency", int64(10000))
 	}
 }
 
@@ -1491,7 +1464,7 @@ func (s *Smart) logConnectionStats(status string, record *smart.StatsRecord, met
 }
 
 // 数据收集
-func (s *Smart) collectConnectionData(status string, record *smart.StatsRecord, metadata *C.Metadata,
+func (s *Smart) collectConnectionData(record *smart.StatsRecord, metadata *C.Metadata,
 	uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, baseWeight float64, proxyName string, isModelPredicted bool) {
 
 	// 采样率控制
@@ -1499,22 +1472,10 @@ func (s *Smart) collectConnectionData(status string, record *smart.StatsRecord, 
 		return
 	}
 
-	var input *lightgbm.ModelInput
-
-	if status == "failed" {
-		input = lightgbm.CreateModelInputFromStats(
-			record.Success, record.Failure, record.ConnectTime, record.Latency,
-			0, 0, 0, 0, 0, 0, 0, 0,
-			0, record.LastUsed.Unix(),
-			metadata.NetWork == C.UDP, metadata.NetWork == C.TCP,
-			metadata,
-		)
-	} else if status == "closed" {
-		input = lightgbm.CreateModelInputFromStatsRecord(
-			record, metadata,
-			uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
-		)
-	}
+	input := lightgbm.CreateModelInputFromStatsRecord(
+		record, metadata,
+		uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+	)
 
 	if input != nil {
 		input.GroupName = s.Name()
@@ -1543,21 +1504,13 @@ func updateAverageValue(oldValue int64, newValue int64, count int64) int64 {
 
 func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy C.Proxy,
 	connectTime int64, latency int64, uploadTotal int64, downloadTotal int64, maxUploadRate int64, maxDownloadRate int64,
-	connectionDuration int64, newCloseCallback bool, err error) {
+	connectionDuration int64, err error) {
 
-	if proxy == nil {
-		return
-	}
+	var calculatedWeight float64
+	var isModelPredicted bool
 
 	domain, rawDomain := smart.GetEffectiveDomain(metadata.Host, metadata.DstIP.String())
 	cacheKey := smart.FormatCacheKey(smart.KeyTypeStats, s.configName, s.Name(), domain, proxy.Name())
-
-	lock := smart.GetDomainNodeLock(domain, s.Name(), proxy.Name())
-	lock.Lock()
-	defer lock.Unlock()
-
-	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, domain, proxy.Name())
-
 	asnInfo := s.getASNCode(metadata)
 	priorityFactor := s.getPriorityFactor(proxy.Name())
 
@@ -1566,150 +1519,83 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		weightType = smart.WeightTypeUDP
 	}
 
-	if status == "failed" {
+	lock := smart.GetDomainNodeLock(domain, s.Name(), proxy.Name())
+	lock.Lock()
+	defer lock.Unlock()
+
+	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, domain, proxy.Name())
+
+	switch status {
+	case "failed":
+		atomicRecord.Add("failure", int64(1))
 		go s.store.MarkConnectionFailed(s.Name(), s.configName, len(s.GetProxies(false)), map[string]bool{proxy.Name(): true}, metadata)
-	} else if status == "success" || newCloseCallback {
+	case "closed":
+		atomicRecord.Add("success", int64(1))
 		go s.store.MarkConnectionSuccess(s.Name(), s.configName)
 	}
 
-	var baseWeight, calculatedWeight, oldWeight, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB float64
-	var needCheckQuality bool
-	var needDataCollection bool
-	var isModelPredicted bool
+	success := atomicRecord.Get("success").(int64)
+	failure := atomicRecord.Get("failure").(int64)
+	connectCount := success + failure
 
-	switch status {
-	case "success":
-		atomicRecord.Add("success", int64(1))
-		success := atomicRecord.Get("success").(int64)
+	if connectTime > 0 {
+		oldConnectTime := atomicRecord.Get("connectTime").(int64)
+		newConnectTime := updateAverageValue(oldConnectTime, connectTime, connectCount)
+		atomicRecord.Set("connectTime", newConnectTime)
+	}
 
-		if connectTime > 0 {
-			oldConnectTime := atomicRecord.Get("connectTime").(int64)
-			newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
-			atomicRecord.Set("connectTime", newConnectTime)
-		}
+	if latency > 0 {
+		oldLatency := atomicRecord.Get("latency").(int64)
+		newLatency := updateAverageValue(oldLatency, latency, connectCount)
+		atomicRecord.Set("latency", newLatency)
+	}
 
-		if latency > 0 {
-			oldLatency := atomicRecord.Get("latency").(int64)
-			newLatency := updateAverageValue(oldLatency, latency, success)
-			atomicRecord.Set("latency", newLatency)
-		}
-	case "failed":
-		atomicRecord.Add("failure", int64(1))
-		success := atomicRecord.Get("success").(int64)
-		failure := atomicRecord.Get("failure").(int64)
-		connectTimeVal := atomicRecord.Get("connectTime").(int64)
-		latencyVal := atomicRecord.Get("latency").(int64)
-		lastUsedVal := atomicRecord.Get("lastUsed").(int64)
+	connectTimeVal := atomicRecord.Get("connectTime").(int64)
+	latencyVal := atomicRecord.Get("latency").(int64)
+	lastUsedVal := atomicRecord.Get("lastUsed").(int64)
+	durationVal := atomicRecord.Get("duration").(float64)
 
-		if s.useLightGBM && s.weightModel != nil {
-			input := lightgbm.CreateModelInputFromStats(
-				success, failure, connectTimeVal, latencyVal,
-				0, 0, 0, 0, 0, 0, 0, 0, 0, lastUsedVal,
-				metadata.NetWork == C.UDP, metadata.NetWork == C.TCP,
-				metadata,
-			)
-			if input != nil {
-				calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
-			} else {
-				calculatedWeight = smart.CalculateWeight(
-					success, failure, connectTimeVal, latencyVal,
-					metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, lastUsedVal) * priorityFactor
-				isModelPredicted = false
-			}
+	uploadTotalMB := float64(uploadTotal) / (1024.0 * 1024.0)
+	downloadTotalMB := float64(downloadTotal) / (1024.0 * 1024.0)
+	maxUploadRateKB := float64(maxUploadRate) / 1024.0
+	maxDownloadRateKB := float64(maxDownloadRate) / 1024.0
+
+	atomicRecord.Add("uploadTotal", uploadTotalMB)
+	atomicRecord.Add("downloadTotal", downloadTotalMB)
+
+	if connectionDuration > 0 {
+		s.updateConnectionDuration(atomicRecord, connectionDuration)
+	}
+
+	oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
+	if maxUploadRateKB > oldMaxUploadRate {
+		atomicRecord.Set("maxUploadRate", maxUploadRateKB)
+	}
+
+	oldMaxDownloadRate := atomicRecord.Get("maxDownloadRate").(float64)
+	if maxDownloadRateKB > oldMaxDownloadRate {
+		atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
+	}
+
+	if s.useLightGBM {
+		tempRecord := atomicRecord.CreateStatsSnapshot()
+		input := lightgbm.CreateModelInputFromStatsRecord(
+			tempRecord, metadata,
+			uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB,
+		)
+		if input != nil {
+			calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(status == "closed", input, priorityFactor)
 		} else {
 			calculatedWeight = smart.CalculateWeight(
-				success, failure, connectTimeVal, latencyVal,
-				metadata.NetWork == C.UDP, 0, 0, 0, 0, 0, lastUsedVal) * priorityFactor
-			isModelPredicted = false
-		}
-
-		needDataCollection = s.collectData && s.dataCollector != nil
-	case "closed":
-		success := atomicRecord.Get("success").(int64)
-		// registerClosureMetricsCallback may call with connectTime and latency
-		if newCloseCallback {
-			atomicRecord.Add("success", int64(1))
-			success = atomicRecord.Get("success").(int64)
-
-			if connectTime > 0 {
-				oldConnectTime := atomicRecord.Get("connectTime").(int64)
-				newConnectTime := updateAverageValue(oldConnectTime, connectTime, success)
-				atomicRecord.Set("connectTime", newConnectTime)
-			}
-
-			if latency > 0 {
-				oldLatency := atomicRecord.Get("latency").(int64)
-				newLatency := updateAverageValue(oldLatency, latency, success)
-				atomicRecord.Set("latency", newLatency)
-			}
-		}
-
-		weights := atomicRecord.Get("weights")
-		if weights != nil {
-			weightsMap := weights.(map[string]float64)
-			oldWeight = weightsMap[weightType]
-		}
-
-		uploadTotalMB = float64(uploadTotal) / (1024.0 * 1024.0)
-		downloadTotalMB = float64(downloadTotal) / (1024.0 * 1024.0)
-		maxUploadRateKB = float64(maxUploadRate) / 1024.0
-		maxDownloadRateKB = float64(maxDownloadRate) / 1024.0
-
-		atomicRecord.Add("uploadTotal", uploadTotalMB)
-		atomicRecord.Add("downloadTotal", downloadTotalMB)
-
-		if connectionDuration > 0 {
-			s.updateConnectionDuration(atomicRecord, connectionDuration)
-		}
-
-		oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
-		if maxUploadRateKB > oldMaxUploadRate {
-			atomicRecord.Set("maxUploadRate", maxUploadRateKB)
-		}
-
-		oldMaxDownloadRate := atomicRecord.Get("maxDownloadRate").(float64)
-		if maxDownloadRateKB > oldMaxDownloadRate {
-			atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
-		}
-
-		failure := atomicRecord.Get("failure").(int64)
-		connectTimeVal := atomicRecord.Get("connectTime").(int64)
-		latencyVal := atomicRecord.Get("latency").(int64)
-		durationVal := atomicRecord.Get("duration").(float64)
-		lastUsedVal := atomicRecord.Get("lastUsed").(int64)
-
-		if s.useLightGBM && s.weightModel != nil {
-			tempRecord := atomicRecord.CreateStatsSnapshot()
-			input := lightgbm.CreateModelInputFromStatsRecord(
-				tempRecord, metadata,
-				uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB,
-			)
-			if input != nil {
-				calculatedWeight, isModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
-			} else {
-				calculatedWeight = smart.CalculateWeight(
-					success, failure, connectTimeVal, latencyVal,
-					metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, lastUsedVal) * priorityFactor
-				isModelPredicted = false
-			}
-		} else {
-			calculatedWeight = smart.CalculateWeight(
-				success, failure, connectTimeVal, latencyVal,
+				status == "closed", success, failure, connectTimeVal, latencyVal,
 				metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, lastUsedVal) * priorityFactor
 			isModelPredicted = false
 		}
-
-		needDataCollection = s.collectData && s.dataCollector != nil
-		s.checkAndLimitStats(atomicRecord)
-		atomicRecord.SetWeight(weightType, calculatedWeight)
-
-		if asnInfo != "" {
-			s.updateAsnWeights(atomicRecord, asnInfo, calculatedWeight, metadata.NetWork == C.UDP)
-		}
-
-		if oldWeight > 0 && calculatedWeight > 0 {
-			needCheckQuality = true
-		}
+	} else {
+		calculatedWeight = smart.CalculateWeight(
+			status == "closed", success, failure, connectTimeVal, latencyVal,
+			metadata.NetWork == C.UDP, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, durationVal, lastUsedVal) * priorityFactor
+		isModelPredicted = false
 	}
 
 	// 额外检查和权重调整
@@ -1731,7 +1617,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 			isDegraded = true
 			log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected manual block, degrade weight from %.4f to %.4f",
 				s.Name(), proxy.Name(), weightType, addressDisplay, calculatedWeight, degradedWeight)
-		} else if needCheckQuality {
+		} else {
 			historyMaxUploadRateKB := atomicRecord.Get("maxUploadRate").(float64)
 			historyMaxDownloadRateKB := atomicRecord.Get("maxDownloadRate").(float64)
 			historyUploadTotal := atomicRecord.Get("uploadTotal").(float64)
@@ -1739,6 +1625,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 			success := atomicRecord.Get("success").(int64)
 			status := atomicRecord.Get("status").(int64)
 			lastUsedVal := atomicRecord.Get("lastUsed").(int64)
+			oldWeight := atomicRecord.Get("weights").(map[string]float64)[weightType]
 
 			degradedWeight, isDegraded = s.checkNodeQualityDegradation(
 				metadata, proxy, atomicRecord,
@@ -1750,38 +1637,34 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		}
 	}
 
-	if status == "failed" || status == "closed" {
-		if isDegraded {
-			calculatedWeight = degradedWeight
-		}
-
-		baseWeight = calculatedWeight / priorityFactor
-
-		atomicRecord.SetWeight(weightType, calculatedWeight)
-
-		if asnInfo != "" {
-			s.updateAsnWeights(atomicRecord, asnInfo, calculatedWeight, metadata.NetWork == C.UDP)
-		}
-
-		statsSnapshot := atomicRecord.CreateStatsSnapshot()
-
-		if isDegraded {
-			go s.cleanupDegradedNodePreferenceCache(metadata, domain, addressDisplay, proxy.Name(), calculatedWeight, weightType, asnInfo)
-		}
-
-		// 数据收集
-		if needDataCollection {
-			s.collectConnectionData(status, statsSnapshot, metadata, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, baseWeight, proxy.Name(), isModelPredicted)
-		}
-
-		// 保存统计记录
-		s.saveStatsRecord(cacheKey, domain, proxy, statsSnapshot, time.Now())
-
-		// 日志输出
-		s.logConnectionStats(status, statsSnapshot, metadata, baseWeight, priorityFactor, addressDisplay, proxy.Name(),
-			uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnInfo, isModelPredicted)
+	if isDegraded {
+		calculatedWeight = degradedWeight
+		go s.cleanupDegradedNodePreferenceCache(metadata, domain, addressDisplay, proxy.Name(), calculatedWeight, weightType, asnInfo)
 	}
+
+	baseWeight := calculatedWeight / priorityFactor
+
+	atomicRecord.SetWeight(weightType, calculatedWeight)
+
+	if asnInfo != "" {
+		s.updateAsnWeights(atomicRecord, asnInfo, calculatedWeight, metadata.NetWork == C.UDP)
+	}
+
+	statsSnapshot := atomicRecord.CreateStatsSnapshot()
+
+	// 数据收集
+	if s.collectData {
+		s.collectConnectionData(statsSnapshot, metadata, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, baseWeight, proxy.Name(), isModelPredicted)
+	}
+
+	// 保存统计记录
+	s.saveStatsRecord(cacheKey, domain, proxy, statsSnapshot, time.Now())
+
+	// 日志输出
+	s.logConnectionStats(status, statsSnapshot, metadata, baseWeight, priorityFactor, addressDisplay, proxy.Name(),
+		uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnInfo, isModelPredicted)
 }
+
 
 func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency int64, readErr error, firstWriteErr error) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
@@ -1795,22 +1678,22 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
 			if readErr == nil {
-				go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
+				go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil)
 			} else if readErr == io.EOF {
 				if firstWriteErr != nil && firstWriteErr != io.EOF {
-					go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, 0, 0, 0, 0, 0, false, readErr)
+					go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, readErr)
 				} else {
-					go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, true, nil)
+					go s.recordConnectionStats("closed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil)
 				}
 			} else {
-				go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, 0, 0, 0, 0, 0, false, readErr)
+				go s.recordConnectionStats("failed", metadata, proxy, connectTime, firstReadLatency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, readErr)
 			}
 			return
 		}
 	})
 }
 
-func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata) C.PacketConn {
+func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
 		if tracker != nil {
@@ -1821,8 +1704,8 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
-			go s.recordConnectionStats("closed", metadata, proxy, 0, 0,
-				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, false, nil)
+			go s.recordConnectionStats("closed", metadata, proxy, connectTime, 0,
+				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil)
 			return
 		}
 	})
