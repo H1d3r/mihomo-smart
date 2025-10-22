@@ -833,7 +833,11 @@ func (s *Smart) selectFallbacks(metadata *C.Metadata, proxies []C.Proxy) []C.Pro
 	}
 
 	if len(fallbacks) == 0 {
-		fallbacks = proxies[:maxSelected]
+		if len(proxies) > maxSelected {
+			fallbacks = proxies[:maxSelected]
+		} else {
+			fallbacks = proxies
+		}
 	}
 
 	return fallbacks
