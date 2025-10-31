@@ -47,8 +47,9 @@ func InitCache() {
 		lru.WithAge[string, map[string][]byte](60),
 	)
 
+	// lazy refresh
 	unwrapCache = lru.New[string, []C.Proxy](
-		lru.WithSize[string, []C.Proxy](1000),
+		lru.WithSize[string, []C.Proxy](500),
 		lru.WithAge[string, []C.Proxy](300),
 	)
 
@@ -446,7 +447,7 @@ func (s *Store) AdjustCacheParameters() {
 	)
 
 	unwrapCache = lru.New[string, []C.Proxy](
-		lru.WithSize[string, []C.Proxy](1000),
+		lru.WithSize[string, []C.Proxy](500),
 		lru.WithAge[string, []C.Proxy](300),
 	)
 

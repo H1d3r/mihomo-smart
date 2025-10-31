@@ -29,7 +29,7 @@ const (
 var (
 	smartModel   *WeightModel
 	reloadModel  = singleflight.Group[bool]{StoreResult: false}
-	modelInit    = singleflight.Group[*WeightModel]{StoreResult: false}
+	modelOnce    sync.Once
 
 	asnNumberRegex = regexp.MustCompile(`^(\d+)`)
 	domainRegex    = regexp.MustCompile(`([a-zA-Z0-9-]+)(\.[a-zA-Z0-9-]+)+$`)
@@ -440,11 +440,7 @@ type ModelInput struct {
 }
 
 func GetModel() *WeightModel {
-    if smartModel != nil {
-        return smartModel
-    }
-
-    model, err, _ := modelInit.Do("init", func() (*WeightModel, error) {
+    modelOnce.Do(func() {
         m := &WeightModel{}
         modelPath := C.Path.SmartModel()
 
@@ -453,17 +449,17 @@ func GetModel() *WeightModel {
                 log.Warnln("[Smart] Model.bin invalid, remove and download: %v", err)
                 if rmErr := os.Remove(modelPath); rmErr != nil {
                     log.Errorln("[Smart] Failed to remove invalid Model.bin: %v", rmErr)
-                    return nil, rmErr
+                    return
                 }
 
                 if downloadErr := downloadModel(modelPath); downloadErr != nil {
                     log.Errorln("[Smart] Failed to download Model.bin: %v", downloadErr)
-                    return nil, downloadErr
+                    return
                 }
 
                 if reloadErr := m.loadModel(modelPath); reloadErr != nil {
                     log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", reloadErr)
-                    return nil, reloadErr
+                    return
                 }
 
                 log.Infoln("[Smart] Model.bin downloaded and loaded successfully")
@@ -474,26 +470,19 @@ func GetModel() *WeightModel {
             log.Infoln("[Smart] Can't find Model.bin, start download")
             if downloadErr := downloadModel(modelPath); downloadErr != nil {
                 log.Errorln("[Smart] Can't download Model.bin: %v", downloadErr)
-                return nil, downloadErr
+                return
             }
 
             if loadErr := m.loadModel(modelPath); loadErr != nil {
                 log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", loadErr)
-                return nil, loadErr
+                return
             }
 
             log.Infoln("[Smart] Download Model.bin finish")
         }
 
-        return m, nil
+        smartModel = m
     })
-
-    if err != nil {
-        log.Errorln("[Smart] Model init failed: %v", err)
-        return nil
-    }
-
-    smartModel = model
 
     return smartModel
 }

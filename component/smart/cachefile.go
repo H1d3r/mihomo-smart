@@ -464,13 +464,18 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 		var cacheGroup string
 		if len(parts) >= 3 {
 			cacheGroup = parts[2]
-			if keyType == KeyTypeStats && len(parts) >= 5 {
-				dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3], parts[4])
-			} else if keyType != KeyTypeStats && len(parts) >= 4 {
-				dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3])
-			} else {
+		} else {
+			return "", nil, false
+		}
+		if keyType == KeyTypeStats {
+			if len(parts) < 5 {
 				return "", nil, false
 			}
+			node := parts[len(parts)-1]
+			domain := strings.Join(parts[3:len(parts)-1], ":")
+			dbKey = FormatDBKey("smart", keyType, config, cacheGroup, domain, node)
+		} else if len(parts) >= 4 {
+			dbKey = FormatDBKey("smart", keyType, config, cacheGroup, parts[3])
 		} else {
 			return "", nil, false
 		}
