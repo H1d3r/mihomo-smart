@@ -15,8 +15,6 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
-	"github.com/samber/lo"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -538,13 +536,9 @@ func (s *Store) GetBestProxyForTarget(group, config, target, asnNumber string, i
 		}
 	}
 
-	type nodeWeight struct {
-		name   string
-		weight float64
-	}
-	var nodeList []nodeWeight
+	var nodeList []NodeWithWeight
 	for node, weight := range nodesWithWeight {
-		nodeList = append(nodeList, nodeWeight{node, weight})
+		nodeList = append(nodeList, NodeWithWeight{node, weight})
 	}
 
 	if len(nodeList) == 0 {
@@ -552,14 +546,17 @@ func (s *Store) GetBestProxyForTarget(group, config, target, asnNumber string, i
 	}
 
 	sort.Slice(nodeList, func(i, j int) bool {
-		return nodeList[i].weight > nodeList[j].weight
+		if nodeList[i].Weight != nodeList[j].Weight {
+			return nodeList[i].Weight > nodeList[j].Weight
+		}
+		return nodeList[i].Node < nodeList[j].Node
 	})
 
 	var bestNodes []string
 	var bestWeights []float64
 	for i := 0; i < len(nodeList); i++ {
-		bestNodes = append(bestNodes, nodeList[i].name)
-		bestWeights = append(bestWeights, nodeList[i].weight)
+		bestNodes = append(bestNodes, nodeList[i].Node)
+		bestWeights = append(bestWeights, nodeList[i].Weight)
 	}
 
 	return bestNodes, bestWeights, nil
@@ -837,56 +834,47 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]string) in
 				sortedNodes = item.bestNodes
 				sortedWeights = item.bestWeights
 			} else {
-				newWeight := math.Round(lo.Sum(item.bestWeights)*100) / 100
-				oldWeight := math.Round(lo.Sum(oldWeights)*100) / 100
+				finalNodeMap := make(map[string]float64)
+				for i, node := range oldNodes {
+					finalNodeMap[node] = oldWeights[i]
+				}
 
-				if slices.Equal(oldNodes, item.bestNodes) {
-					if newWeight != oldWeight {
-						needUpdate = true
+				needUpdate = false
+
+				for i, newNode := range item.bestNodes {
+					newW := item.bestWeights[i]
+					if oldW, exists := finalNodeMap[newNode]; exists {
+						if math.Abs(newW-oldW)/oldW > 0.2 || newW < AllowedWeight {
+							finalNodeMap[newNode] = newW
+							needUpdate = true
+						}
 					} else {
-						needUpdate = false
+						finalNodeMap[newNode] = newW
+						needUpdate = true
 					}
-					sortedNodes = item.bestNodes
-					sortedWeights = item.bestWeights
-				} else {
+				}
 
-					finalNodeMap := make(map[string]float64)
-					for i, node := range oldNodes {
-						finalNodeMap[node] = oldWeights[i]
-					}
-					for i, newNode := range item.bestNodes {
-						newWeight := item.bestWeights[i]
-						finalNodeMap[newNode] = newWeight
-					}
-
-					type nodeWeight struct {
-						node   string
-						weight float64
-					}
-					var nodeList []nodeWeight
+				if needUpdate {
+					var nodeList []NodeWithWeight
 					for node, weight := range finalNodeMap {
-						nodeList = append(nodeList, nodeWeight{node, weight})
+						nodeList = append(nodeList, NodeWithWeight{node, weight})
 					}
 					sort.Slice(nodeList, func(i, j int) bool {
-						return nodeList[i].weight > nodeList[j].weight
+						if nodeList[i].Weight != nodeList[j].Weight {
+							return nodeList[i].Weight > nodeList[j].Weight
+						}
+						return nodeList[i].Node < nodeList[j].Node
 					})
 
 					sortedNodes = make([]string, len(nodeList))
 					sortedWeights = make([]float64, len(nodeList))
 					for i, nw := range nodeList {
-						sortedNodes[i] = nw.node
-						sortedWeights[i] = nw.weight
+						sortedNodes[i] = nw.Node
+						sortedWeights[i] = nw.Weight
 					}
-
-					needUpdate = !slices.Equal(oldNodes, sortedNodes)
-					if !needUpdate {
-						for i := range oldWeights {
-							if math.Abs(oldWeights[i]-sortedWeights[i]) > 0.1 {
-								needUpdate = true
-								break
-							}
-						}
-					}
+				} else {
+					sortedNodes = item.bestNodes
+					sortedWeights = item.bestWeights
 				}
 			}
 
@@ -1183,7 +1171,7 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		}
 		return firstErr
 	}
-	for path, data := range prefetchResults {
+	for path := range prefetchResults {
 		parts := strings.Split(path, "/")
 		if len(parts) < 5 {
 			continue
@@ -1193,73 +1181,43 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 			continue
 		}
 
-		var pm PrefetchMap
-		if err := json.Unmarshal(data, &pm); err != nil {
-			continue
-		}
-
-		changed := false
-
-		if len(pm.TCP.Nodes) > 0 {
-			newNodes := make([]string, 0, len(pm.TCP.Nodes))
-			newWeights := make([]float64, 0, len(pm.TCP.Weights))
-			for i, node := range pm.TCP.Nodes {
-				if _, toRemove := nodeSet[node]; !toRemove {
-					newNodes = append(newNodes, node)
-					if i < len(pm.TCP.Weights) {
-						newWeights = append(newWeights, pm.TCP.Weights[i])
-					}
-				} else {
-					changed = true
-				}
-			}
-			if len(newNodes) == 0 {
-				pm.TCP = NodeWithWeight{}
-				changed = true
-			} else {
-				pm.TCP = NodeWithWeight{Nodes: newNodes, Weights: newWeights}
-			}
-		}
-
-		if len(pm.UDP.Nodes) > 0 {
-			newNodes := make([]string, 0, len(pm.UDP.Nodes))
-			newWeights := make([]float64, 0, len(pm.UDP.Weights))
-			for i, node := range pm.UDP.Nodes {
-				if _, toRemove := nodeSet[node]; !toRemove {
-					newNodes = append(newNodes, node)
-					if i < len(pm.UDP.Weights) {
-						newWeights = append(newWeights, pm.UDP.Weights[i])
-					}
-				} else {
-					changed = true
-				}
-			}
-			if len(newNodes) == 0 {
-				pm.UDP = NodeWithWeight{}
-				changed = true
-			} else {
-				pm.UDP = NodeWithWeight{Nodes: newNodes, Weights: newWeights}
-			}
-		}
-
-		dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
 		cacheKey := FormatCacheKey(KeyTypePrefetch, config, group, target)
-
-		if changed {
-			if len(pm.TCP.Nodes) == 0 && len(pm.UDP.Nodes) == 0 {
-				s.DeleteCacheResult(KeyTypePrefetch, config, group, target, "")
-			} else {
-				newData, merr := json.Marshal(pm)
-				if merr != nil {
-					if firstErr == nil {
-						firstErr = merr
+		if value, found := GetCacheValue(cacheKey); found {
+			if bv, ok := value.([]byte); ok {
+				var pm PrefetchMap
+				if json.Unmarshal(bv, &pm) == nil {
+					changed := false
+					if pm.RefTCP != "" {
+						if _, refFound := GetCacheValue(pm.RefTCP); !refFound {
+							pm.RefTCP = ""
+							changed = true
+						}
 					}
-					continue
+					if pm.RefUDP != "" {
+						if _, refFound := GetCacheValue(pm.RefUDP); !refFound {
+							pm.RefUDP = ""
+							changed = true
+						}
+					}
+					if changed {
+						if pm.RefTCP == "" && pm.RefUDP == "" && len(pm.TCP.Nodes) == 0 && len(pm.UDP.Nodes) == 0 {
+							s.DeleteCacheResult(KeyTypePrefetch, config, group, target, "")
+						} else {
+							newData, merr := json.Marshal(pm)
+							if merr != nil {
+								if firstErr == nil {
+									firstErr = merr
+								}
+								continue
+							}
+							SetCacheValue(cacheKey, newData)
+							dbKey := FormatDBKey("smart", KeyTypePrefetch, config, group, target)
+							if perr := s.DBBatchPutItem(dbKey, newData); perr != nil && firstErr == nil {
+								firstErr = perr
+							}
+						}
+					}
 				}
-				if perr := s.DBBatchPutItem(dbKey, newData); perr != nil && firstErr == nil {
-					firstErr = perr
-				}
-				SetCacheValue(cacheKey, newData)
 			}
 		}
 	}
@@ -1444,6 +1402,7 @@ func (s *Store) MarkConnectionFailed(group, config, triedProxies, domain string,
 	if failedNodeCount >= nodeThreshold {
 		networkKey := FormatCacheKey(keyTypeNetwork, config, group)
 		SetCacheValue(networkKey, true)
+		unwrapCache.Clear()
 		log.Warnln("[SmartStore] Network failure detected for group [%s:%s], failed nodes: %d", group, config, failedNodeCount)
 	}
 }

@@ -30,10 +30,10 @@ const (
 
 const (
 	KeyTypePrefetch         = "prefetch"
-	KeyTypeFailed           = "failed"
 	KeyTypeNode             = "node"
 	KeyTypeStats            = "stats"
 	KeyTypeRanking          = "ranking"
+	KeyTypeFailed           = "failed"
 	keyTypeNetwork          = "network"
 
 	WeightTypeTCP           = "tcp"
@@ -58,6 +58,8 @@ const (
 	MemoryCacheSizeFactor   = 0.7
 	MemoryBatchFactor       = 0.7
 	MemoryPrefetchFactor    = 0.7
+
+	AllowedWeight           = 0.4
 
 	RankMostUsed            = "MostUsed"
 	RankOccasional          = "OccasionalUsed"
@@ -95,7 +97,7 @@ var (
 
 	nodeStatesCache *lru.LruCache[string, map[string][]byte]
 
-	unwrapCache *lru.LruCache[string, []C.Proxy]
+	unwrapCache *lru.LruCache[string, UnwrapMap]
 
 	recordCache *lru.LruCache[string, *AtomicStatsRecord]
 )
@@ -164,15 +166,28 @@ type (
 		DomainFailureCount map[string]int `json:"domain_failure_count"`
 	}
 
-	NodeWithWeight struct {
+	NodesWithWeights struct {
 		Nodes   []string  `json:"nodes"`
 		Weights []float64 `json:"weights"`
 	}
 
+	NodeWithWeight struct {
+		Node   string
+		Weight float64
+	}
+
 	PrefetchMap struct {
-		TCP NodeWithWeight `json:"tcp,omitempty"`
-		UDP NodeWithWeight `json:"udp,omitempty"`
-		Ref string         `json:"ref,omitempty"`
+		TCP    NodesWithWeights `json:"tcp,omitempty"`
+		UDP    NodesWithWeights `json:"udp,omitempty"`
+		RefTCP string           `json:"ref_tcp,omitempty"`
+		RefUDP string           `json:"ref_udp,omitempty"`
+	}
+
+	UnwrapMap struct {
+		TCP    []C.Proxy `json:"tcp,omitempty"`
+		UDP    []C.Proxy `json:"udp,omitempty"`
+		RefTCP string    `json:"ref_tcp,omitempty"`
+		RefUDP string    `json:"ref_udp,omitempty"`
 	}
 )
 
