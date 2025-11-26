@@ -57,7 +57,7 @@ jobs:
       - name: Remove inbound test for macOS
         if: ${{ runner.os == 'macOS' }}
         run: |
-          rm listener/inbound/*_test.go
+          rm -rf listener/inbound/*_test.go
 
       - name: Test
         run: go test ./... -v -count=1
