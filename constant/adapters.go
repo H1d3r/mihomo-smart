@@ -60,6 +60,7 @@ var ErrNotSupport = errors.New("no support")
 
 type Connection interface {
 	Chains() Chain
+	ProviderChains() Chain
 	AppendToChains(adapter ProxyAdapter)
 	RemoteDestination() string
 }
@@ -103,13 +104,14 @@ type Dialer interface {
 }
 
 type ProxyInfo struct {
-	XUDP        bool
-	TFO         bool
-	MPTCP       bool
-	SMUX        bool
-	Interface   string
-	RoutingMark int
-	DialerProxy string
+	XUDP         bool
+	TFO          bool
+	MPTCP        bool
+	SMUX         bool
+	Interface    string
+	RoutingMark  int
+	ProviderName string
+	DialerProxy  string
 }
 
 type ProxyAdapter interface {
