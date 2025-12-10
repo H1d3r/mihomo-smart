@@ -390,7 +390,7 @@ func (s *Store) AdjustCacheParameters() {
 	needAdjust := isFirstRun
 
 	if !isFirstRun {
-		memoryChanged := math.Abs(memoryUsage-globalCacheParams.LastMemoryUsage) > 0.1
+		memoryChanged := math.Abs(memoryUsage - globalCacheParams.LastMemoryUsage) * globalCacheParams.MemoryLimit > 20
 		needAdjust = memoryChanged || memoryUsage > 0.7
 	}
 
@@ -413,22 +413,10 @@ func (s *Store) AdjustCacheParameters() {
 		globalCacheParams.MaxTargets,
 		globalCacheParams.BatchSaveThreshold)
 
-	targetCache = lru.New[string, string](
-		lru.WithSize[string, string](globalCacheParams.MaxTargets / 4),
-	)
-
-	unwrapCache = lru.New[string, UnwrapMap](
-		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets / 4),
-	)
-
-	recordCache = lru.New[string, *AtomicStatsRecord](
-		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets / 4),
-	)
-
-	dbResultCache = lru.New[string, map[string][]byte](
-		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets / 4),
-		lru.WithAge[string, map[string][]byte](300),
-	)
+	targetCache = lru.ResetLRU(targetCache, globalCacheParams.MaxTargets / 4)
+	unwrapCache = lru.ResetLRU(unwrapCache, globalCacheParams.MaxTargets / 4)
+	recordCache = lru.ResetLRU(recordCache, globalCacheParams.MaxTargets / 4)
+	dbResultCache = lru.ResetLRU(dbResultCache, globalCacheParams.MaxTargets / 4, lru.WithAge[string, map[string][]byte](300))
 
 	if (memoryUsage > 0.8) {
 		go s.FlushQueue(true)

@@ -2,7 +2,6 @@ package smart
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"regexp"
 	"runtime"
@@ -62,9 +61,6 @@ var (
 	db *bbolt.DB
 	bucketSmartStats = []byte("smart_stats")
 
-	globalInitInstances = make(map[string]bool)
-	globalInitLock      sync.Mutex
-
 	globalOperationQueue atomic.TypedValue[[]StoreOperation]
 
 	globalCacheParams struct {
@@ -74,9 +70,6 @@ var (
 		LastMemoryUsage    float64
 		mutex              sync.RWMutex
 	}
-
-	cachedMemoryLimit float64
-	memoryLimitOnce   sync.Once
 
 	targetCache *lru.LruCache[string, string]
 
@@ -361,72 +354,44 @@ func GetSystemMemoryUsage() float64 {
 	memLimit := globalCacheParams.MemoryLimit
 	globalCacheParams.mutex.RUnlock()
 
-	if memLimit <= 0 {
-		memLimit = 100
-	}
-
 	return math.Min(inuse/memLimit, 1.0)
 }
 
-// 检查当前实例是否是特定配置的第一个实例
-func IsFirstInstanceForConfig(config string) bool {
-	globalInitLock.Lock()
-	defer globalInitLock.Unlock()
+func getSystemMemoryLimit() float64 {
+	var memTotal float64 = 100.0
+	var output string
+	var err error
 
-	key := fmt.Sprintf("%s", config)
-	if globalInitInstances[key] {
-		return false
+	if runtime.GOOS == "windows" {
+		output, err = cmd.ExecCmd("wmic OS get TotalVisibleMemorySize")
+		if err == nil {
+			lines := strings.Split(output, "\n")
+			if len(lines) >= 2 {
+				memStr := strings.TrimSpace(lines[1])
+				memKB, parseErr := strconv.ParseFloat(memStr, 64)
+				if parseErr == nil {
+					memTotal = memKB / 1024.0
+				}
+			}
+		}
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "android" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
+		output, err = cmd.ExecCmd("grep MemTotal /proc/meminfo")
+		if err == nil {
+			parts := strings.Fields(output)
+			if len(parts) >= 2 {
+				memStr := strings.TrimSuffix(parts[1], "kB")
+				memStr = strings.TrimSpace(memStr)
+				memKB, parseErr := strconv.ParseFloat(memStr, 64)
+				if parseErr == nil {
+					memTotal = memKB / 1024.0
+				}
+			}
+		}
 	}
 
-	globalInitInstances[key] = true
-	return true
-}
+	memTotal = math.Max(100.0, math.Min(memTotal / 4.0, 512.0))
 
-func getSystemMemoryLimit() float64 {
-	memoryLimitOnce.Do(func() {
-		var memTotal float64 = 100.0
-		var output string
-		var err error
-
-		if runtime.GOOS == "windows" {
-			output, err = cmd.ExecCmd("wmic OS get TotalVisibleMemorySize")
-			if err == nil {
-				lines := strings.Split(output, "\n")
-				if len(lines) >= 2 {
-					memStr := strings.TrimSpace(lines[1])
-					memKB, parseErr := strconv.ParseFloat(memStr, 64)
-					if parseErr == nil {
-						memTotal = memKB / 1024.0
-					}
-				}
-			}
-		} else if runtime.GOOS == "linux" || runtime.GOOS == "android" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
-			output, err = cmd.ExecCmd("grep MemTotal /proc/meminfo")
-			if err == nil {
-				parts := strings.Fields(output)
-				if len(parts) >= 2 {
-					memStr := strings.TrimSuffix(parts[1], "kB")
-					memStr = strings.TrimSpace(memStr)
-					memKB, parseErr := strconv.ParseFloat(memStr, 64)
-					if parseErr == nil {
-						memTotal = memKB / 1024.0
-					}
-				}
-			}
-		}
-
-		memTotal = memTotal / 4.0
-
-		if memTotal < 100.0 {
-			cachedMemoryLimit = 100.0
-		} else if memTotal > 512.0 {
-			cachedMemoryLimit = 512.0
-		} else {
-			cachedMemoryLimit = memTotal
-		}
-	})
-
-	return cachedMemoryLimit
+	return memTotal
 }
 
 func InitQueue()  {
@@ -450,10 +415,6 @@ func replaceGlobalQueue(newQueue []StoreOperation) {
 
 func getGlobalQueueSnapshot() []StoreOperation {
 	return globalOperationQueue.Load()
-}
-
-func swapGlobalQueue(newQueue []StoreOperation) []StoreOperation {
-	return globalOperationQueue.Swap(newQueue)
 }
 
 func updateGlobalQueue(updateFunc func([]StoreOperation) []StoreOperation) {
