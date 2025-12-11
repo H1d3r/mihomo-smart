@@ -215,6 +215,11 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, asnNumber
 		return
 	}
 
+	names := make([]string, len(proxies))
+	for i, p := range proxies {
+		names[i] = p.Name()
+	}
+
 	targetKey := fmt.Sprintf("%s:%s:%s", config, group, target)
 
 	if asnNumber != "" && !CdnASNs[asnNumber] {
@@ -223,21 +228,21 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, asnNumber
 			um := value
 			if isUDP {
 				if len(um.UDP) == 0 {
-					um.UDP = proxies
+					um.UDP = names
 					unwrapCache.Set(asnKey, um)
 				}
 			} else {
 				if len(um.TCP) == 0 {
-					um.TCP = proxies
+					um.TCP = names
 					unwrapCache.Set(asnKey, um)
 				}
 			}
 		} else {
 			um := UnwrapMap{}
 			if isUDP {
-				um.UDP = proxies
+				um.UDP = names
 			} else {
-				um.TCP = proxies
+				um.TCP = names
 			}
 			unwrapCache.Set(asnKey, um)
 		}
@@ -268,24 +273,24 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, asnNumber
 		if value, found := unwrapCache.Get(targetKey); found {
 			um := value
 			if isUDP {
-				um.UDP = proxies
+				um.UDP = names
 			} else {
-				um.TCP = proxies
+				um.TCP = names
 			}
 			unwrapCache.Set(targetKey, um)
 		} else {
 			um := UnwrapMap{}
 			if isUDP {
-				um.UDP = proxies
+				um.UDP = names
 			} else {
-				um.TCP = proxies
+				um.TCP = names
 			}
 			unwrapCache.Set(targetKey, um)
 		}
 	}
 }
 
-func (s *Store) GetUnwrapResult(group, config, target, asnNumber string, isUDP bool) []C.Proxy {
+func (s *Store) GetUnwrapResult(group, config, target, asnNumber string, isUDP bool) []string {
 	if target == "" {
 		return nil
 	}

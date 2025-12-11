@@ -14,7 +14,6 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/common/lru"
-	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
 	"golang.org/x/net/publicsuffix"
@@ -164,8 +163,8 @@ type (
 	}
 
 	UnwrapMap struct {
-		TCP    []C.Proxy `json:"tcp,omitempty"`
-		UDP    []C.Proxy `json:"udp,omitempty"`
+		TCP    []string  `json:"tcp,omitempty"`
+		UDP    []string  `json:"udp,omitempty"`
 		RefTCP string    `json:"ref_tcp,omitempty"`
 		RefUDP string    `json:"ref_udp,omitempty"`
 	}
