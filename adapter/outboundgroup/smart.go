@@ -1671,11 +1671,10 @@ func (s *Smart) getASNCode(metadata *C.Metadata) string {
 					metadata.DstIPASN = "unknown"
 					return ""
 				}
-                metadata.DstIP = ip
             }
         }
 
-		asn, aso := mmdb.ASNInstance().LookupASN(metadata.DstIP.AsSlice())
+		asn, aso := mmdb.ASNInstance().LookupASN(ip.AsSlice())
 		if asn == "" {
 			metadata.DstIPASN = "unknown"
 		} else {
