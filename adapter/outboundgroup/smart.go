@@ -1446,7 +1446,7 @@ func (s *Smart) checkNodeQualityDegradation(
 	}
 
 	// 零流量连接
-	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 && !isUDP {
+	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 && metadata.DstPort == 443 && !isUDP {
 		s.store.UpdateTargetFailureStats(s.Name(), s.configName, host, 1, stats)
 		if blockEnabled {
 			return newWeight, false
