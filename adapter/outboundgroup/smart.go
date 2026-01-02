@@ -1392,7 +1392,7 @@ func (s *Smart) checkNodeQualityDegradation(
 		if selectedProxy != nil {
 			cacheKey := smart.FormatDBKey(smart.KeyTypeStats, s.configName, s.Name(), target, (*selectedProxy).Name())
 			record := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, target, (*selectedProxy).Name())
-			boostedWeight := math.Max(record.GetWeight(weightType), oldWeight * 1.5)
+			boostedWeight := math.Max(record.GetWeight(weightType), oldWeight)
 			record.SetWeight(weightType, boostedWeight, isUDP)
 			statsSnapshot := record.CreateStatsSnapshot()
 			s.saveStatsRecord(target, *selectedProxy, statsSnapshot, now)
