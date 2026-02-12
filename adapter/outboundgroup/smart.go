@@ -1350,7 +1350,7 @@ func (s *Smart) checkNodeQualityDegradation(
 		updateWeights = append(updateWeights, currentWeight)
 		proxies := s.selectProxies(metadata, s.GetProxies(false), false)
 		if statusMap[host] {
-			statusMap[host] = false
+			delete(statusMap, host)
 			atomicRecord.Set("status", statusMap)
 		}
 
