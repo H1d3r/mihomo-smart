@@ -1094,22 +1094,22 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
 }
 
 // 目标失败屏蔽
-func (s *Store) TargetBlocked(group, config, target string) bool {
+func (s *Store) TargetBlocked(group, config, target string) (bool, int64) {
 	pathPrefix := FormatDBKey(KeyTypeTargetFailures, config, group, target)
 	rawResult, err := s.GetSubBytesByPath(pathPrefix)
 	if err != nil {
-		return false
+		return false, 0
 	}
 
 	for _, data := range rawResult {
 		var stats TargetStatus
 		if err := json.Unmarshal(data, &stats); err != nil {
-			return false
+			return false, 0
 		}
-		return stats.Blocked
+		return stats.Blocked, stats.LastFailure
 	}
 
-	return false
+	return false, 0
 }
 
 func (s *Store) UpdateTargetStatus(group, config, target string, failureCount int, maxFailedTimes int) {

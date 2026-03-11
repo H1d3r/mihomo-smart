@@ -1211,7 +1211,6 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		s.updateConnectionDuration(atomicRecord, connectionDuration)
 	}
 
-	lastUsedVal := atomicRecord.Get("lastUsed").(int64)
 	oldWeight := atomicRecord.GetWeight(weightType)
 
 	uploadTotalMB := float64(uploadTotal) / (1024.0 * 1024.0)
@@ -1250,7 +1249,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		addressDisplay, proxy.Name(), calculatedWeight, oldWeight,
 		connectionDuration, uploadTotalMB, downloadTotalMB,
 		weightType, metadata.NetWork.String(),
-		lastUsedVal, target, wildcardTarget, asnInfo, metadata.NetWork == C.UDP)
+		target, wildcardTarget, asnInfo, metadata.NetWork == C.UDP)
 
 	s.findSameConnection(metadata, proxy.Name(), target, asnInfo, metadata.NetWork == C.UDP, isDegraded)
 
@@ -1329,7 +1328,7 @@ func (s *Smart) checkNodeQualityDegradation(
 	newWeight, oldWeight float64,
 	connectionDuration int64,
 	uploadTotal, downloadTotal float64,
-	weightType, networkType string, lastUsedVal int64,
+	weightType, networkType string,
 	target, host, asnInfo string, isUDP bool) (float64, bool) {
 
 	newWeight = updateAverageValueFloat(oldWeight, newWeight, false)
@@ -1347,7 +1346,9 @@ func (s *Smart) checkNodeQualityDegradation(
 
 	var updateLimit bool
 
-	if lastUsedVal + 5 > now {
+	hostBlocked, hostLastFailure := s.store.TargetBlocked(s.Name(), s.configName, host);
+
+	if hostLastFailure + 5 > now {
 		updateLimit = true
 	}
 
@@ -1356,9 +1357,12 @@ func (s *Smart) checkNodeQualityDegradation(
 		if updateLimit {
 			return degradedWeight, false
 		}
+		if metadata.SmartBlock == "degraded" {
+			return oldWeight, false
+		}
 		s.store.UpdateTargetStatus(s.Name(), s.configName, host, 1, s.maxFailedTimes)
 		s.updatePrefetchCache(metadata, target, addressDisplay, proxyName, degradedWeight, asnInfo, isUDP)
-		log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected smart block, degraded form [%.4f] to [%.4f] ...",
+		log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected manual block, degraded form [%.4f] to [%.4f] ...",
 			s.Name(), proxyName, networkType, addressDisplay, oldWeight, degradedWeight)
 		return degradedWeight, true
 	}
@@ -1366,7 +1370,7 @@ func (s *Smart) checkNodeQualityDegradation(
 	if status == "failed" {
 		failedWeight, nodeBlock := s.handleFailedConnection(proxy.Name(), oldWeight, newWeight)
 		if nodeBlock {
-			if s.store.TargetBlocked(s.Name(), s.configName, host) {
+			if hostBlocked {
 				return newWeight, false
 			}
 			if updateLimit {
@@ -1382,7 +1386,7 @@ func (s *Smart) checkNodeQualityDegradation(
 
 	// 零流量连接
 	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 && metadata.DstPort == 443 && !isUDP {
-		if s.store.TargetBlocked(s.Name(), s.configName, host) {
+		if hostBlocked {
 			return newWeight, false
 		}
 		if updateLimit {
@@ -1397,26 +1401,24 @@ func (s *Smart) checkNodeQualityDegradation(
 
 	// 异常状态码检测
 	if downloadTotal < 0.03 && metadata.Host != "" && metadata.DstPort == 443 && !isUDP {
-		if now - lastUsedVal > 300 {
-			ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTCPTimeout)
-			defer cancel()
-			url := "https://" + metadata.Host + "/?z=" + strconv.FormatInt(rand.Int63(), 10)
-			status, ok, err := proxy.StatusTest(ctx, url)
-			if err == nil {
-				if !ok {
-					if s.store.TargetBlocked(s.Name(), s.configName, host) {
-						return newWeight, false
-					}
-					if updateLimit {
-						return degradedWeight, false
-					}
-					s.store.UpdateTargetStatus(s.Name(), s.configName, host, 1, s.maxFailedTimes)
-					s.updatePrefetchCache(metadata, target, addressDisplay, proxyName, degradedWeight, asnInfo, isUDP)
-					log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected abnormal response [%d], degraded form [%.4f] to [%.4f] ...",
-						s.Name(), proxyName, networkType, addressDisplay, status, oldWeight, degradedWeight)
-					return degradedWeight, true
-				} 
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTCPTimeout)
+		defer cancel()
+		url := "https://" + metadata.Host + "/?z=" + strconv.FormatInt(rand.Int63(), 10)
+		status, ok, err := proxy.StatusTest(ctx, url)
+		if err == nil {
+			if !ok {
+				if hostBlocked {
+					return newWeight, false
+				}
+				if updateLimit {
+					return degradedWeight, false
+				}
+				s.store.UpdateTargetStatus(s.Name(), s.configName, host, 1, s.maxFailedTimes)
+				s.updatePrefetchCache(metadata, target, addressDisplay, proxyName, degradedWeight, asnInfo, isUDP)
+				log.Debugln("[Smart] Connection [%s] - [%s] - [%s] - [%s] detected abnormal response [%d], degraded form [%.4f] to [%.4f] ...",
+					s.Name(), proxyName, networkType, addressDisplay, status, oldWeight, degradedWeight)
+				return degradedWeight, true
+			} 
 		}
 	}
 
