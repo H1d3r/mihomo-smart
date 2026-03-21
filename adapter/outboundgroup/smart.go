@@ -70,9 +70,7 @@ type Smart struct {
 	selected               string
 	testUrl                string
 	expectedStatus         string
-	Icon                   string
 	disableUDP             bool
-	Hidden                 bool
 
 	dataCollector          *lightgbm.DataCollector
 	weightModel            *lightgbm.WeightModel
@@ -131,8 +129,6 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, opt
 		expectedStatus:       option.ExpectedStatus,
 		configName:           configName,
 		disableUDP:           option.DisableUDP,
-		Hidden:               option.Hidden,
-		Icon:                 option.Icon,
 		policyPriority:       make([]priorityRule, 0),
 		sampleRate:           1,
 	}
@@ -471,8 +467,8 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"testUrl":         s.testUrl,
 		"expectedStatus":  s.expectedStatus,
 		"fixed":           s.selected,
-		"hidden":          s.Hidden,
-		"icon":            s.Icon,
+		"hidden":          s.Hidden(),
+		"icon":            s.Icon(),
 		"policy-priority": policyPriorityStr,
 		"useLightGBM":     s.useLightGBM,
 		"collectData":     s.collectData,
