@@ -42,7 +42,7 @@ const (
 	recoveryCheckInterval    = 5 * time.Minute
 	checkInterval            = 10 * time.Minute
 	flushQueueInterval       = 5 * time.Minute
-	rankingInterval          = 30 * time.Minute
+	rankingInterval          = 5 * time.Minute
 
 	maxRetries               = 4
 	maxSelected              = 10
@@ -684,7 +684,7 @@ func (s *Smart) InitSmart() {
 
 	s.startTimedTask(10*time.Minute, checkInterval, "Group orphaned nodes clean up", s.cleanupOrphanedNodeCache, true)
 	s.startTimedTask(5*time.Minute, prefetchInterval, "Group targets prefetch", s.runPrefetch, false)
-	s.startTimedTask(10*time.Minute, rankingInterval, "Group nodes Ranking", s.updateNodeRanking, false)
+	s.startTimedTask(1*time.Minute, rankingInterval, "Group nodes Ranking", s.updateNodeRanking, false)
 	s.startTimedTask(5*time.Minute, recoveryCheckInterval, "Group nodes recovery check", s.checkAndRecoverDegradedNodes, false)
 	s.startTimedTask(10*time.Minute, cleanupInterval, "Group old records clean up", func() {
 		_ = s.store.CleanupOldRecords(s.Name(), s.configName)
@@ -766,9 +766,54 @@ func (s *Smart) runPrefetch() {
 }
 
 func (s *Smart) updateNodeRanking() {
+	proxies := s.GetProxies(true)
+	rankingCache, _ := s.store.GetNodeWeightRankingCache(s.Name(), s.configName)
+
+	if len(rankingCache) > 0 {
+		now := time.Now().Unix()
+		lastUpdated := rankingCache[0].LastUpdated
+		cacheAge := time.Duration(now - lastUpdated) * time.Second
+
+		if cacheAge < 30 * time.Minute {
+			proxyMap := make(map[string]C.Proxy, len(proxies))
+			for _, p := range proxies {
+				proxyMap[p.Name()] = p
+			}
+
+			rankedNodes := make(map[string]bool, len(rankingCache))
+			for _, r := range rankingCache {
+				rankedNodes[r.Name] = true
+			}
+			hasUnrankedProxy := false
+			for _, p := range proxies {
+				if !rankedNodes[p.Name()] {
+					hasUnrankedProxy = true
+					break
+				}
+			}
+
+			hasDeadRankedNode := false
+			for _, r := range rankingCache {
+				if r.Rank != smart.RankRarelyUsed {
+					if p, exists := proxyMap[r.Name]; exists {
+						if !p.AliveForTestUrl(s.testUrl) {
+							hasDeadRankedNode = true
+							break
+						}
+					}
+				}
+			}
+
+			if !hasUnrankedProxy {
+				if !hasDeadRankedNode || cacheAge <= 10 * time.Minute {
+					return
+				}
+			}
+		}
+	}
+
 	log.Debugln("[Smart] Starting node ranking update for policy group [%s]", s.Name())
 
-	proxies := s.GetProxies(true)
 	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, s.testUrl, proxies)
 	if err != nil {
 		log.Warnln("[Smart] Failed to update node ranking: %v", err)
@@ -1172,6 +1217,10 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 		addressDisplay += " - ASN: [unknown]"
 	}
 
+	if proxy.Type() == C.Compatible || proxy.Type() == C.Reject || proxy.Type() == C.Pass || proxy.Type() == C.RejectDrop {
+		return
+	}
+
 	lock := smart.GetTargetNodeLock(target, s.Name(), proxy.Name())
 	lock.Lock()
 	defer lock.Unlock()
@@ -1180,19 +1229,10 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 	switch status {
 	case "failed":
-		if proxy.Type() == C.Reject || proxy.Type() == C.Pass || proxy.Type() == C.RejectDrop {
-			return
-		}
 		s.onDialFailed(proxy.Type(), err, s.healthCheck)
-		if ! proxy.AliveForTestUrl(s.testUrl) {
-			return
-		}
 		atomicRecord.Add("failure", int64(1))
 	case "closed":
 		s.onDialSuccess()
-		if ! proxy.AliveForTestUrl(s.testUrl) {
-			return
-		}
 		atomicRecord.Add("success", int64(1))
 	}
 

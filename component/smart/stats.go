@@ -53,9 +53,10 @@ type ActiveTarget struct {
 }
 
 type NodeRank struct {
-	Name   string
-	Rank   string
-	Weight int
+	Name        string
+	Rank        string
+	Weight      float64
+	LastUpdated int64
 }
 
 type targetMinHeap []ActiveTarget
@@ -359,11 +360,11 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 
 	for node := range allNodes {
 		score := nodeScores[node]
-		percentScore := 0
+		percentScore := 0.0
 		if maxScore > 0 {
-			percentScore = int(float64(score) / float64(maxScore) * 100)
+			percentScore = math.Round(float64(score)/float64(maxScore) * 100 * 100) / 100
 		}
-		result = append(result, NodeRank{Name: node, Weight: percentScore, Rank: ""})
+		result = append(result, NodeRank{Name: node, Weight: percentScore, LastUpdated: time.Now().Unix(), Rank: ""})
 	}
 
 	sort.Slice(result, func(i, j int) bool {
