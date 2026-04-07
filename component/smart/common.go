@@ -42,7 +42,7 @@ const (
 const (
 	DefaultMinSampleCount   = 2
 
-	MaxTargetsLimit         = 4000
+	MaxTargetsLimit         = 5000
 	MinTargetsLimit         = 500
 	MaxBatchThreshLimit     = 300
 	MinBatchThreshLimit     = 50
