@@ -105,7 +105,7 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 		log.Debugln("[Smart] Failed to request weight ranking: Not a Smart group (actual type: %T)", proxy.Adapter())
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, render.M{
-			"weights": []smart.NodeRank{},
+			"weights": []smart.NodeRankItem{},
 			"error":   "Not a Smart group",
 		})
 		return
@@ -118,34 +118,33 @@ func getGroupWeights(w http.ResponseWriter, r *http.Request) {
 	if smartStore == nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, render.M{
-			"weights": []smart.NodeRank{},
+			"weights": []smart.NodeRankItem{},
 			"error":   "Smart cache not available",
 		})
 		return
 	}
 
-	weights, err := smartStore.GetNodeWeightRankingCache(groupName, configName)
+	wrapper, err := smartStore.GetNodeWeightRankingCache(groupName, configName)
 	if err != nil {
 		log.Warnln("[Smart] Failed to get weight ranking: %s", err.Error())
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, render.M{
-			"weights": []smart.NodeRank{},
+			"weights": []smart.NodeRankItem{},
 			"error":   "Failed to get weight ranking: " + err.Error(),
 		})
 		return
 	}
-
-	if len(weights) == 0 {
+	if len(wrapper.Result) == 0 {
 		log.Debugln("Policy group %s has no weight data", groupName)
 		render.JSON(w, r, render.M{
-			"weights": []smart.NodeRank{},
+			"weights": []smart.NodeRankItem{},
 			"message": "No weight data available for the specified group",
 		})
 		return
 	}
 
 	render.JSON(w, r, render.M{
-		"weights": weights,
+		"weights": wrapper.Result,
 	})
 }
 
@@ -154,14 +153,14 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 	if smartStore == nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, render.M{
-			"weights": map[string][]smart.NodeRank{},
+			"weights": map[string][]smart.NodeRankItem{},
 			"errors":  map[string]string{},
 			"error":   "Smart cache not available",
 		})
 		return
 	}
 
-	result := make(map[string][]smart.NodeRank)
+	result := make(map[string][]smart.NodeRankItem)
 	errorsMap := make(map[string]string)
 
 	var (
@@ -185,7 +184,7 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			weights, err := smartStore.GetNodeWeightRankingCache(groupName, configName)
+			wrapper, err := smartStore.GetNodeWeightRankingCache(groupName, configName)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -193,7 +192,7 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 				errorsMap[groupName] = err.Error()
 				return
 			}
-			result[groupName] = weights
+			result[groupName] = wrapper.Result
 		}(groupName, configName)
 	}
 
@@ -202,7 +201,7 @@ func getAllGroupWeights(w http.ResponseWriter, r *http.Request) {
 	if len(result) == 0 && len(errorsMap) == 0 {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, render.M{
-			"weights": map[string][]smart.NodeRank{},
+			"weights": map[string][]smart.NodeRankItem{},
 			"message": "No Smart groups or no weight data available",
 		})
 		return

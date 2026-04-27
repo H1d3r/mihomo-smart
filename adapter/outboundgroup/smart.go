@@ -44,10 +44,10 @@ const (
 	flushQueueInterval       = 5 * time.Minute
 	rankingInterval          = 5 * time.Minute
 
-	maxRetries               = 4
+	maxRetries               = 3
 	maxSelected              = 10
 
-	parallelDials            = 3
+	parallelDials            = 5
 	connectThreshold         = 2.0
 )
 
@@ -238,9 +238,9 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		var historyConnectTime int64
 		var timeout time.Duration
 		if i == 0 {
-			batch = []C.Proxy{proxies[0]}
+			batch = proxies[0:1]
 		} else {
-			begin := (i-1)*parallelDials + 1
+			begin := 1 + (i-1) * parallelDials
 			if begin >= len(proxies) {
 				return nil, 0
 			}
@@ -259,7 +259,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		}
 
 		if historyConnectTime > 0 {
-			timeout = time.Duration(float64(historyConnectTime)*connectThreshold) * time.Millisecond
+			timeout = time.Duration(float64(historyConnectTime) * connectThreshold) * time.Millisecond
 		}
 
 		if timeout > C.DefaultTCPTimeout || timeout <= 0 {
@@ -272,19 +272,6 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 	tryDial := func(proxies []C.Proxy) (C.Conn, error) {
 		var finalErr error
 		for i := 0; i < maxRetries; i++ {
-			if i > 0 {
-				baseDelay := time.Duration(math.Pow(2, float64(i-1))) * 50 * time.Millisecond
-				jitterRange := 0.2
-				jitter := 1.0 + (rand.Float64()*2-1)*jitterRange
-				backoffDuration := time.Duration(float64(baseDelay) * jitter)
-
-				select {
-				case <-time.After(backoffDuration):
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
-			}
-
 			batch, timeout := getBatch(proxies, i)
 			if len(batch) == 0 {
 				break
@@ -308,7 +295,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		return nil, finalErr
 	}
 
-	proxies, _ := s.selectProxies(metadata, availableProxies)
+	proxies := s.selectProxies(metadata, availableProxies)
 	return tryDial(proxies)
 }
 
@@ -320,7 +307,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	proxies := s.GetProxies(true)
 	metadata.SmartBlock = "normal"
 
-	availableProxies, _ = s.selectProxies(metadata, proxies)
+	availableProxies = s.selectProxies(metadata, proxies)
 	
 	for i := 0; i < len(availableProxies) && i < 3; i++ {
 		proxy = availableProxies[i]
@@ -365,11 +352,9 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 		}
 	}
 
-	proxies, isUnwrapResult := s.selectProxies(metadata, proxies)
+	proxies = s.selectProxies(metadata, proxies)
 
-	if !isUnwrapResult {
-		s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, s.getASNCode(metadata), metadata.NetWork == C.UDP, proxies)
-	}
+	s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, s.getASNCode(metadata), metadata.NetWork == C.UDP, proxies)
 
 	return proxies[0]
 }
@@ -479,7 +464,62 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func (s *Smart) fillProxies(metadata *C.Metadata, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, unwrap bool) ([]C.Proxy, bool) {
+func calcMADThreshold(delays []float64) float64 {
+	n := len(delays)
+	if n == 0 {
+		return 0
+	}
+
+	var median float64
+	if n % 2 == 1 {
+		median = delays[n / 2]
+	} else {
+		median = (delays[n / 2 - 1] + delays[n / 2]) / 2
+	}
+
+	devs := make([]float64, 0, n)
+	for _, v := range delays {
+		devs = append(devs, math.Abs(v - median))
+	}
+	sort.Float64s(devs)
+
+	var mad float64
+	if n % 2 == 1 {
+		mad = devs[n / 2]
+	} else {
+		mad = (devs[n / 2 - 1] + devs[n / 2]) / 2
+	}
+
+	if mad == 0 {
+		// fallback to mean + 2*std
+		mean := 0.0
+		for _, v := range delays {
+			mean += v
+		}
+		mean /= float64(n)
+		varSum := 0.0
+		for _, v := range delays {
+			d := v - mean
+			varSum += d * d
+		}
+		std := math.Sqrt(varSum / float64(n))
+		return mean + 2 * std
+	}
+
+	const scale = 1.4826
+	const defaultK = 2.5
+	const smallK = 3.5
+
+	k := defaultK
+	if n < maxSelected {
+		k = smallK
+	}
+
+	threshold := median + k * scale * mad
+	return threshold
+}
+
+func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, unwrap bool) []C.Proxy {
 	blockedNodes, _ := s.store.GetBlockedNodes(s.Name(), s.configName)
 
 	proxyByName := make(map[string]C.Proxy)
@@ -501,20 +541,58 @@ func (s *Smart) fillProxies(metadata *C.Metadata, names []string, weights []floa
 		}
 	}
 
+	if len(selected) > 0 {
+		filtered := make([]C.Proxy, 0, len(selected))
+		for _, p := range selected {
+			if len(filtered) >= minCount {
+				break
+			}
+
+			histories := p.DelayHistoryForTestUrl(s.testUrl)
+			if len(histories) == 0 {
+				filtered = append(filtered, p)
+				continue
+			}
+
+			delays := make([]float64, 0, len(histories))
+			for _, h := range histories {
+				if h.Delay == 0 {
+					h.Delay = 0xffff
+				}
+				delays = append(delays, float64(h.Delay))
+			}
+
+			sort.Float64s(delays)
+			threshold := calcMADThreshold(delays)
+
+			if threshold <= 0 {
+				continue
+			}
+
+			lastDelay := delays[len(delays)-1]
+			if lastDelay <= threshold {
+				filtered = append(filtered, p)
+			}
+		}
+
+		if len(filtered) > 0 {
+			selected = filtered
+		}
+	}
+
 	// Unwrap result should not filled
 	if unwrap && len(selected) > 0 {
-		return selected, true
+		return selected
 	}
 
 	if len(selected) >= len(all) {
-		return selected, false
+		return selected
 	}
 
 	if len(selected) >= minCount {
-		return selected[:minCount], false
+		return selected[:minCount]
 	}
 
-	var firstAppended bool
 	checkWeightsMap := make(map[string]float64)
 	for i, name := range names {
 		if weights != nil && i < len(weights) {
@@ -524,107 +602,124 @@ func (s *Smart) fillProxies(metadata *C.Metadata, names []string, weights []floa
 
 	filteredAll := []C.Proxy{}
 	for _, p := range all {
-		if _, exists := checkWeightsMap[p.Name()]; !exists {
+		if _, exists := checkWeightsMap[p.Name()]; !exists && !blockedNodes[p.Name()] && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
 			filteredAll = append(filteredAll, p)
 		}
 	}
 
+	n := len(filteredAll)
+	delaysMap := make(map[string]uint16, n)
+	for _, p := range filteredAll {
+		delaysMap[p.Name()] = p.LastDelayForTestUrl(s.testUrl)
+	}
+
+	sort.Slice(filteredAll, func(i, j int) bool {
+		di := delaysMap[filteredAll[i].Name()]
+		dj := delaysMap[filteredAll[j].Name()]
+		if di == dj {
+			return filteredAll[i].Name() < filteredAll[j].Name()
+		}
+		return di < dj
+	})
+
 	if len(s.policyPriority) > 0 {
-		proxiesFactor := make(map[string]float64)
+		proxiesFactor := make(map[string]float64, len(filteredAll))
 		for _, p := range filteredAll {
 			proxiesFactor[p.Name()] = s.getPriorityFactor(p.Name())
 		}
 
-		sort.Slice(filteredAll, func(i, j int) bool {
+		sort.SliceStable(filteredAll, func(i, j int) bool {
 			factorI := proxiesFactor[filteredAll[i].Name()]
 			factorJ := proxiesFactor[filteredAll[j].Name()]
-			if factorI == factorJ {
-				return filteredAll[i].Name() < filteredAll[j].Name()
-			}
 			return factorI > factorJ
 		})
-	} else if ranking, err := s.store.GetNodeWeightRankingCache(s.Name(), s.configName); err == nil && len(ranking) > 0 {
-		weightsMap := make(map[string]float64)
-		for _, r := range ranking {
-			weightsMap[r.Name] = float64(r.Weight)
-		}
-		sort.Slice(filteredAll, func(i, j int) bool {
-			wi, existsi := weightsMap[filteredAll[i].Name()]
-			wj, existsj := weightsMap[filteredAll[j].Name()]
-			if existsi && existsj {
-				if wi != wj {
-					return wi > wj
-				}
-				return filteredAll[i].Name() < filteredAll[j].Name()
-			}
-			if existsi {
-				return true
-			}
-			if existsj {
-				return false
-			}
-			return filteredAll[i].Name() < filteredAll[j].Name()
-		})
 	} else {
-		sort.Slice(filteredAll, func(i, j int) bool {
-			di := filteredAll[i].LastDelayForTestUrl(s.testUrl)
-			dj := filteredAll[j].LastDelayForTestUrl(s.testUrl)
-			if di == dj {
-				return filteredAll[i].Name() < filteredAll[j].Name()
+		if n > minCount && len(selected) > minCount / 2 {
+			delays := make([]float64, n)
+			for i := 0; i < n; i++ {
+				delays[i] = float64(delaysMap[filteredAll[i].Name()])
 			}
-			return di < dj
-		})
-	}
 
-	indexes := make([]int, len(filteredAll))
-	for i := range indexes {
-		indexes[i] = i
-	}
+			threshold := calcMADThreshold(delays)
 
-	for _, idx := range indexes {
-		p := filteredAll[idx]
-		if !blockedNodes[p.Name()] && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
-			if !firstAppended && len(names) < minCount {
-				selected = append([]C.Proxy{p}, selected...)
-				firstAppended = true
+			normal := make([]C.Proxy, 0, n)
+			outliers := make([]C.Proxy, 0, n)
+			for _, p := range filteredAll {
+				if float64(delaysMap[p.Name()]) <= threshold {
+					normal = append(normal, p)
+				} else {
+					outliers = append(outliers, p)
+				}
+			}
+
+			if len(normal) == 0 || len(outliers) == 0 {
+				rand.Shuffle(len(filteredAll), func(i, j int) {
+					filteredAll[i], filteredAll[j] = filteredAll[j], filteredAll[i]
+				})
 			} else {
-				selected = append(selected, p)
-			}
-			if len(selected) >= minCount {
-				selected = selected[:minCount]
-				break
+				rand.Shuffle(len(normal), func(i, j int) {
+					normal[i], normal[j] = normal[j], normal[i]
+				})
+				filteredAll = append(normal, outliers...)
 			}
 		}
-		if len(selected) == len(all) {
+	}
+
+	var firstAppended bool
+
+	for _, p := range filteredAll {
+		if !firstAppended && len(names) < minCount {
+			selected = append([]C.Proxy{p}, selected...)
+			firstAppended = true
+		} else {
+			selected = append(selected, p)
+		}
+		if len(selected) >= minCount {
+			selected = selected[:minCount]
 			break
 		}
 	}
 
 	if len(selected) == 0 {
-		indexes = rand.Perm(len(all))
-		for _, idx := range indexes {
-			if all[idx].AliveForTestUrl(s.testUrl) {
-				selected = append(selected, all[idx])
+		allN := len(all)
+		allDelays := make([]uint16, allN)
+		for i := 0; i < allN; i++ {
+			allDelays[i] = all[i].LastDelayForTestUrl(s.testUrl)
+		}
+
+		sort.Slice(all, func(i, j int) bool {
+			di := allDelays[i]
+			dj := allDelays[j]
+			if di == dj {
+				return all[i].Name() < all[j].Name()
+			}
+			return di < dj
+		})
+
+		for _, p := range all {
+			if p.AliveForTestUrl(s.testUrl) {
+				selected = append(selected, p)
 			}
 			if len(selected) >= minCount {
 				break
 			}
 		}
-		if len(selected) == 0 {
-			for _, idx := range indexes {
-				selected = append(selected, all[idx])
-				if len(selected) >= minCount {
-					break
-				}
+	}
+
+	if len(selected) == 0 {
+		for _, p := range all {
+			selected = append(selected, p)
+			if len(selected) >= minCount {
+				break
 			}
 		}
 	}
 
-	return selected, false
+	return selected
 }
 
 // 节点选择
-func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Proxy, bool) {
+func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy {
 	// 添加ASN信息
 	asnNumber := s.getASNCode(metadata)
 	if metadata.SmartTarget == "" {
@@ -634,7 +729,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {
-				return []C.Proxy{p}, true
+				return []C.Proxy{p}
 			}
 		}
 	}
@@ -659,9 +754,9 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	}
 
 	resultNames, resultWeights, unwrap := trySelector(metadata.NetWork == C.UDP)
-	result, isUnwrapResult := s.fillProxies(metadata, resultNames, resultWeights, proxies, maxSelected, metadata.NetWork == C.UDP, unwrap)
+	result := s.filterProxies(metadata, resultNames, resultWeights, proxies, maxSelected, metadata.NetWork == C.UDP, unwrap)
 
-	return result, isUnwrapResult
+	return result
 }
 
 func (s *Smart) InitSmart() {
@@ -768,11 +863,11 @@ func (s *Smart) runPrefetch() {
 
 func (s *Smart) updateNodeRanking() {
 	proxies := s.GetProxies(true)
-	rankingCache, _ := s.store.GetNodeWeightRankingCache(s.Name(), s.configName)
+	rankingWrapper, _ := s.store.GetNodeWeightRankingCache(s.Name(), s.configName)
 
-	if len(rankingCache) > 0 {
+	if len(rankingWrapper.Result) > 0 {
 		now := time.Now().Unix()
-		lastUpdated := rankingCache[0].LastUpdated
+		lastUpdated := rankingWrapper.LastUpdated
 		cacheAge := time.Duration(now - lastUpdated) * time.Second
 
 		if cacheAge < 30 * time.Minute {
@@ -781,8 +876,8 @@ func (s *Smart) updateNodeRanking() {
 				proxyMap[p.Name()] = p
 			}
 
-			rankedNodes := make(map[string]bool, len(rankingCache))
-			for _, r := range rankingCache {
+			rankedNodes := make(map[string]bool, len(rankingWrapper.Result))
+			for _, r := range rankingWrapper.Result {
 				rankedNodes[r.Name] = true
 			}
 			hasUnrankedProxy := false
@@ -794,7 +889,7 @@ func (s *Smart) updateNodeRanking() {
 			}
 
 			hasDeadRankedNode := false
-			for _, r := range rankingCache {
+			for _, r := range rankingWrapper.Result {
 				if r.Rank != smart.RankRarelyUsed {
 					if p, exists := proxyMap[r.Name]; exists {
 						if !p.AliveForTestUrl(s.testUrl) {
@@ -815,24 +910,22 @@ func (s *Smart) updateNodeRanking() {
 
 	log.Debugln("[Smart] Starting node ranking update for policy group [%s]", s.Name())
 
-	ranking, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, s.testUrl, proxies)
+	rankingWrapper, err := s.store.GetNodeWeightRanking(s.Name(), s.configName, s.testUrl, proxies)
 	if err != nil {
 		log.Warnln("[Smart] Failed to update node ranking: %v", err)
 		return
 	}
-
-	if len(ranking) == 0 {
+	if len(rankingWrapper.Result) == 0 {
 		log.Debugln("[Smart] Policy group [%s] doesn't have enough data to generate node ranking", s.Name())
 		return
 	}
-
 	categoryCounts := make(map[string]int)
-	for _, rank := range ranking {
+	for _, rank := range rankingWrapper.Result {
 		categoryCounts[rank.Rank]++
 	}
 
 	log.Debugln("[Smart] Policy group [%s] node ranking update completed: %d nodes total (%s: %d, %s: %d, %s: %d)",
-		s.Name(), len(ranking),
+		s.Name(), len(rankingWrapper.Result),
 		smart.RankMostUsed, categoryCounts[smart.RankMostUsed],
 		smart.RankOccasional, categoryCounts[smart.RankOccasional],
 		smart.RankRarelyUsed, categoryCounts[smart.RankRarelyUsed])
@@ -1276,7 +1369,7 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 	input := lightgbm.CreateModelInputFromStatsRecord(
 		atomicRecord, metadata,
-		uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, wildcardTarget,
+		uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, float64(connectionDuration) / 60000.0, wildcardTarget,
 	)
 
 	if s.useLightGBM && s.weightModel != nil {
@@ -1296,11 +1389,11 @@ func (s *Smart) recordConnectionStats(status string, metadata *C.Metadata, proxy
 
 	if isDegraded {
 		s.updatePrefetchCache(metadata, target, addressDisplay, proxy.Name(), degradedWeight, asnInfo, metadata.NetWork == C.UDP)
+		s.findSameConnection(metadata, proxy.Name(), target, asnInfo, metadata.NetWork == C.UDP)
 	}
 
 	needLastUsedUpdate := downloadTotalMB < 0.03 && metadata.Host != "" && metadata.DstPort == 443 && metadata.NetWork == C.TCP
 	s.store.UpdateHostStatus(s.Name(), s.configName, wildcardTarget, isDegraded, needLastUsedUpdate)
-	s.findSameConnection(metadata, proxy.Name(), target, asnInfo, metadata.NetWork == C.UDP, isDegraded)
 
 	baseWeight := degradedWeight / priorityFactor
 
@@ -1445,7 +1538,7 @@ func (s *Smart) checkNodeQualityDegradation(
 	// 权重波动
 	if oldWeight > 0 && newWeight > 0 {
 		weightDropRatio := (oldWeight - newWeight) / oldWeight
-		if weightDropRatio > 0.3 {
+		if weightDropRatio > 0.2 {
 			log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected weight drop %.2f%% form [%.4f] to [%.4f], refine selected result...",
 				s.Name(), proxyName, networkType, addressDisplay, weightDropRatio*100, oldWeight, newWeight)
 			return newWeight, true
@@ -1455,34 +1548,26 @@ func (s *Smart) checkNodeQualityDegradation(
 	return newWeight, false
 }
 
-func (s *Smart) findSameConnection(metadata *C.Metadata, proxyName, target, asnInfo string, isUDP, close bool) {
+func (s *Smart) findSameConnection(metadata *C.Metadata, proxyName, target, asnInfo string, isUDP bool) {
 	allIDs := statistic.DefaultManager.GetSmartTargetIDs(target, asnInfo)
-	hasOther := false
 
-	if close {
-		for id := range allIDs {
-			if tracker := statistic.DefaultManager.Get(id); tracker != nil {
-				if id != metadata.UUID && lo.Contains(tracker.Chains(), s.Name()) {
-					if lo.Contains(tracker.Chains(), proxyName) {
-						if metadata.SmartBlock == "blocked" {
-							tracker.Info().Metadata.SmartBlock = "blocked"
-						} else {
-							tracker.Info().Metadata.SmartBlock = "degraded"
-						}
+	for id := range allIDs {
+		if tracker := statistic.DefaultManager.Get(id); tracker != nil {
+			if id != metadata.UUID && lo.Contains(tracker.Chains(), s.Name()) {
+				if lo.Contains(tracker.Chains(), proxyName) {
+					if metadata.SmartBlock == "blocked" {
+						tracker.Info().Metadata.SmartBlock = "blocked"
+					} else {
+						tracker.Info().Metadata.SmartBlock = "degraded"
 					}
-					_ = tracker.Close()
 				}
+				_ = tracker.Close()
 			}
 		}
-	} else {
-		delete(allIDs, metadata.UUID)
-		if len(allIDs) > 0 {
-			hasOther = true
-		}
 	}
-	if !hasOther {
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnInfo, isUDP)
-	}
+
+	s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnInfo, isUDP)
+
 }
 
 func (s *Smart) updatePrefetchCache(metadata *C.Metadata, target, addressDisplay string, nodeName string, weight float64, asnInfo string, isUDP bool) {
@@ -1543,34 +1628,73 @@ func (s *Smart) getPriorityFactor(proxyName string) float64 {
 
 func smartWithPolicyPriority(policyPriority string) smartOption {
 	return func(s *Smart) {
+		lastUnescapedColon := func(str string) int {
+			for i := len(str) - 1; i >= 0; i-- {
+				if str[i] == ':' {
+					bs := 0
+					j := i - 1
+					for j >= 0 && str[j] == '\\' {
+						bs++
+						j--
+					}
+					if bs%2 == 0 {
+						return i
+					}
+				}
+			}
+			return -1
+		}
+
+		unescapePattern := func(p string) string {
+			var b strings.Builder
+			for i := 0; i < len(p); i++ {
+				if p[i] == '\\' && i+1 < len(p) {
+					b.WriteByte(p[i+1])
+					i++
+				} else {
+					b.WriteByte(p[i])
+				}
+			}
+			return b.String()
+		}
+
 		pairs := strings.Split(policyPriority, ";")
 		for _, pair := range pairs {
-			kv := strings.SplitN(pair, ":", 2)
-			if len(kv) != 2 || strings.TrimSpace(kv[1]) == "" {
-				log.Warnln("[Smart] Invalid policy-priority rule: '%s', must be in 'pattern:factor' format and factor is required", pair)
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
 				continue
 			}
-			pattern := kv[0]
-			if factor, err := strconv.ParseFloat(kv[1], 64); err == nil {
-				if factor <= 0 {
-					log.Warnln("[Smart] Invalid priority factor %.2f for pattern '%s', factor must be positive", factor, pattern)
-					continue
-				}
 
-				rule := priorityRule{
-					pattern: pattern,
-					factor:  factor,
-				}
-
-				if re, err := regexp2.Compile(pattern, regexp2.None); err == nil {
-					rule.regex = re
-					rule.isRegex = true
-				}
-
-				s.policyPriority = append(s.policyPriority, rule)
-			} else {
-				log.Warnln("[Smart] Invalid priority factor format for pattern '%s': %v", pattern, err)
+			idx := lastUnescapedColon(pair)
+			if idx <= 0 || idx == len(pair)-1 {
+				log.Warnln("[Smart] Invalid policy-priority rule: [%s], must be in 'pattern:factor' format and factor is required", pair)
+				continue
 			}
+
+			patternRaw := strings.TrimSpace(pair[:idx])
+			factorStr := strings.TrimSpace(pair[idx+1:])
+
+			factor, err := strconv.ParseFloat(factorStr, 64)
+			if err != nil {
+				log.Warnln("[Smart] Invalid priority factor format for pattern [%s:%v]", patternRaw, err)
+				continue
+			}
+			if factor <= 0 {
+				log.Warnln("[Smart] Invalid priority factor [%.2f] for pattern [%s], factor must be positive", factor, patternRaw)
+				continue
+			}
+
+			rule := priorityRule{
+				pattern: unescapePattern(patternRaw),
+				factor:  factor,
+			}
+
+			if re, err := regexp2.Compile(rule.pattern, regexp2.None); err == nil {
+				rule.regex = re
+				rule.isRegex = true
+			}
+
+			s.policyPriority = append(s.policyPriority, rule)
 		}
 	}
 }

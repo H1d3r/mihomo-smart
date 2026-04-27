@@ -52,11 +52,15 @@ type ActiveTarget struct {
 	LastUsed int64
 }
 
+type NodeRankItem struct {
+	Name   string
+	Rank   string
+	Weight float64
+}
+
 type NodeRank struct {
-	Name        string
-	Rank        string
-	Weight      float64
-	LastUpdated int64
+	LastUpdated int64           `json:"last_updated"`
+	Result      []NodeRankItem  `json:"result"`
 }
 
 type targetMinHeap []ActiveTarget
@@ -296,28 +300,28 @@ func (r *AtomicStatsRecord) minASNWeight(prefix string) float64 {
 }
 
 // 获取节点权重排名缓存
-func (s *Store) GetNodeWeightRankingCache(group, config string) ([]NodeRank, error) {
+func (s *Store) GetNodeWeightRankingCache(group, config string) (NodeRank, error) {
 	pathPrefix := FormatDBKey(KeyTypeRanking, config, group)
 	rawResult, err := s.GetSubBytesByPath(pathPrefix)
 	if err != nil {
-		return nil, err
+		return NodeRank{}, err
 	}
 
 	for _, data := range rawResult {
-		var ranking []NodeRank
-		if err := json.Unmarshal(data, &ranking); err == nil && len(ranking) > 0 {
-			return ranking, nil
+		var wrapper NodeRank
+		if err := json.Unmarshal(data, &wrapper); err == nil && len(wrapper.Result) > 0 {
+			return wrapper, nil
 		}
 	}
 
-	return []NodeRank{}, nil
+	return NodeRank{}, nil
 }
 
 // 获取节点权重排名
-func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.Proxy) ([]NodeRank, error) {
-	var result []NodeRank
+func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.Proxy) (NodeRank, error) {
+	var resultItems []NodeRankItem
 	if len(proxies) == 0 {
-		return result, fmt.Errorf("no proxies provided")
+		return NodeRank{}, fmt.Errorf("no proxies provided")
 	}
 
 	allNodes := make(map[string]bool, len(proxies))
@@ -335,19 +339,27 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 
 	activeTargets := s.GetActiveTargets(group, config, prefetchLimit)
 
-	nodeScores := make(map[string]int)
+	nodeScores := make(map[string]float64)
+
 	for _, ad := range activeTargets {
-		nodes, _ := s.GetPrefetchResult(group, config, ad.Target, ad.ASN, ad.IsUDP)
-		for i := 0; i < len(nodes) && i < 10; i++ {
+		nodes, weights := s.GetPrefetchResult(group, config, ad.Target, ad.ASN, ad.IsUDP)
+		for i := 0; i < len(nodes); i++ {
 			node := nodes[i]
-			if allNodes[node] {
-				score := 100 - i*10
-				nodeScores[node] += score
+			if !allNodes[node] {
+				continue
 			}
+			if weights[i] < AllowedWeight {
+				break
+			}
+			score := 1.0 / float64(i+1)
+			if score < 1e-4 {
+				break
+			}
+			nodeScores[node] += score
 		}
 	}
 
-	maxScore := 0
+	maxScore := 0.0
 	for _, score := range nodeScores {
 		if score > maxScore {
 			maxScore = score
@@ -355,41 +367,42 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 	}
 
 	if maxScore == 0 {
-		return []NodeRank{}, nil
+		return NodeRank{}, nil
 	}
 
 	for node := range allNodes {
 		score := nodeScores[node]
 		percentScore := 0.0
 		if maxScore > 0 {
-			percentScore = math.Round(float64(score)/float64(maxScore) * 100 * 100) / 100
+			percentScore = math.Round(score / maxScore * 100 * 100) / 100
 		}
-		result = append(result, NodeRank{Name: node, Weight: percentScore, LastUpdated: time.Now().Unix(), Rank: ""})
+		resultItems = append(resultItems, NodeRankItem{Name: node, Weight: percentScore, Rank: ""})
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		ai := aliveNodes[result[i].Name]
-		aj := aliveNodes[result[j].Name]
+	sort.Slice(resultItems, func(i, j int) bool {
+		ai := aliveNodes[resultItems[i].Name]
+		aj := aliveNodes[resultItems[j].Name]
 		if ai != aj {
 			return ai
 		}
-		if result[i].Weight != result[j].Weight {
-			return result[i].Weight > result[j].Weight
+		if resultItems[i].Weight != resultItems[j].Weight {
+			return resultItems[i].Weight > resultItems[j].Weight
 		}
-		return result[i].Name < result[j].Name
+		return resultItems[i].Name < resultItems[j].Name
 	})
 
-	if len(result) > 0 {
+	if len(resultItems) > 0 {
 		aliveCount := 0
-		for _, r := range result {
+		for _, r := range resultItems {
 			if aliveNodes[r.Name] {
 				aliveCount++
 			}
 		}
+
 		if aliveCount > 0 {
 			positiveAliveCount := 0
-			for i := 0; i < aliveCount; i++ {
-				if result[i].Weight > 0 {
+			for i := 0; i < aliveCount && i < len(resultItems); i++ {
+				if resultItems[i].Weight > 0 {
 					positiveAliveCount++
 				}
 			}
@@ -399,40 +412,34 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 				if mostUsedBound < 1 {
 					mostUsedBound = 1
 				}
-				if mostUsedBound > positiveAliveCount {
-					mostUsedBound = positiveAliveCount
-				}
 
 				occasionalBound := mostUsedBound + int(float64(positiveAliveCount)*0.5)
-				if occasionalBound > positiveAliveCount {
-					occasionalBound = positiveAliveCount
-				}
 
 				for i := 0; i < mostUsedBound; i++ {
-					result[i].Rank = RankMostUsed
+					resultItems[i].Rank = RankMostUsed
 				}
 				for i := mostUsedBound; i < occasionalBound; i++ {
-					result[i].Rank = RankOccasional
+					resultItems[i].Rank = RankOccasional
 				}
-				for i := occasionalBound; i < positiveAliveCount; i++ {
-					result[i].Rank = RankRarelyUsed
-				}
-				for i := positiveAliveCount; i < aliveCount; i++ {
-					result[i].Rank = RankRarelyUsed
+				for i := occasionalBound; i < aliveCount; i++ {
+					resultItems[i].Rank = RankRarelyUsed
 				}
 			}
 		}
-		for i := aliveCount; i < len(result); i++ {
-			result[i].Rank = RankRarelyUsed
+
+		for i := aliveCount; i < len(resultItems); i++ {
+			resultItems[i].Rank = RankRarelyUsed
 		}
-	}
 
-	s.StoreNodeWeightRanking(group, config, result)
-	return result, nil
+		wrapper := NodeRank{LastUpdated: time.Now().Unix(), Result: resultItems}
+		s.StoreNodeWeightRanking(group, config, wrapper)
+		return wrapper, nil
+    }
+
+    return NodeRank{}, nil
 }
-
 // 存储节点权重排名
-func (s *Store) StoreNodeWeightRanking(group, config string, ranking []NodeRank) {
+func (s *Store) StoreNodeWeightRanking(group, config string, ranking NodeRank) {
 	data, err := json.Marshal(ranking)
 	if err != nil {
 		return
@@ -1265,14 +1272,14 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 		return firstErr
 	}
 	for path, data := range rankingResults {
-		var ranking []NodeRank
-		if err := json.Unmarshal(data, &ranking); err != nil {
+		var wrapper NodeRank
+		if err := json.Unmarshal(data, &wrapper); err != nil {
 			continue
 		}
 
 		changed := false
-		newRanking := make([]NodeRank, 0, len(ranking))
-		for _, rank := range ranking {
+		newResult := make([]NodeRankItem, 0, len(wrapper.Result))
+		for _, rank := range wrapper.Result {
 			toRemove := false
 			for _, node := range nodes {
 				if rank.Name == node {
@@ -1282,17 +1289,18 @@ func (s *Store) RemoveNodesData(group, config string, nodes []string) error {
 				}
 			}
 			if !toRemove {
-				newRanking = append(newRanking, rank)
+				newResult = append(newResult, rank)
 			}
 		}
 
 		if changed {
-			if len(newRanking) == 0 {
+			if len(newResult) == 0 {
 				if delErr := s.DBBatchDeletePrefix(path, true); delErr != nil && firstErr == nil {
 					firstErr = delErr
 				}
 			} else {
-				newData, merr := json.Marshal(newRanking)
+				newWrapper := NodeRank{LastUpdated: wrapper.LastUpdated, Result: newResult}
+				newData, merr := json.Marshal(newWrapper)
 				if merr != nil {
 					if firstErr == nil {
 						firstErr = merr

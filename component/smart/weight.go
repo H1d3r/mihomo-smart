@@ -35,10 +35,15 @@ func CalculateWeight(input *ModelInput, priorityFactor float64) (float64, bool) 
 	latency := input.Latency
 	isUDP := input.IsUDP
 	uploadMB := input.UploadTotal
+	historyUploadTotal := input.HistoryUploadTotal
 	downloadMB := input.DownloadTotal
+	historyDownloadTotal := input.HistoryDownloadTotal
 	maxUploadRateKB := input.MaxuploadRate
+	historyMaxUploadRate := input.HistoryMaxUploadRate
 	maxDownloadRateKB := input.MaxdownloadRate
+	historyMaxDownloadRate := input.HistoryMaxDownloadRate
 	durationMinutes := input.ConnectionDuration
+	historyConnectionDuration := input.HistoryConnectionDuration
 	lastConnectTimestamp := input.LastUsed
 	
 	// 2. 检查样本数量
@@ -112,8 +117,8 @@ func CalculateWeight(input *ModelInput, priorityFactor float64) (float64, bool) 
 	// 10. 流量因子计算
 	var trafficFactor float64 = 0
 	if uploadMB > 0 || downloadMB > 0 {
-		uploadFactor := calculateTrafficFactor(uploadMB, maxUploadRateKB, durationMinutes, isShortConnection)
-		downloadFactor := calculateTrafficFactor(downloadMB, maxDownloadRateKB, durationMinutes, isShortConnection)
+		uploadFactor := calculateTrafficFactor(uploadMB, maxUploadRateKB, durationMinutes, historyMaxUploadRate, historyUploadTotal, historyConnectionDuration, isShortConnection)
+		downloadFactor := calculateTrafficFactor(downloadMB, maxDownloadRateKB, durationMinutes, historyMaxDownloadRate, historyDownloadTotal, historyConnectionDuration, isShortConnection)
 
 		// 根据场景调整上下行权重
 		var uploadWeight, downloadWeight float64
@@ -212,7 +217,7 @@ func identifyConnectionScene(isUDP bool, latency int64, uploadMB, downloadMB, ma
 }
 
 // 计算流量因子
-func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes float64, isShort bool) float64 {
+func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes, historyMaxRateKB, historyTotalMB, historyConnDuration float64, isShort bool) float64 {
 	if trafficMB <= 0 || durationMinutes <= 0 {
 		return 0.0
 	}
@@ -245,7 +250,6 @@ func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes float64, isSho
 		baseFactor = 1.74 + 0.02*math.Log10(trafficMB/3000)
 	}
 
-	// 吞吐量加成
 	var rateBonus float64
 	switch {
 	case maxRateKB < 20:
@@ -267,21 +271,76 @@ func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes float64, isSho
 		rateBonus = 1.32 + 0.02*math.Log10(maxRateKB/100000.0)
 		rateBonus = math.Min(rateBonus, 1.36)
 	}
-	baseFactor *= rateBonus
 
-	// 平均流量加成
-	var connectionFactor float64
-	throughput := trafficMB / math.Max(1.0, durationMinutes)
-	if isShort {
-		connectionFactor = 0.85 + 0.15*math.Min(1, throughput/25.0)
-	} else {
-		connectionFactor = 1.0
-		if throughput > 5 {
-			baseFactor *= 1.0 + 0.15*math.Min(1, (throughput-5)/80.0)
+	accelBonus := 1.0
+	if durationMinutes > 0 {
+		throughputKBs := (trafficMB * 1024.0) / math.Max(1.0, durationMinutes*60.0)
+		if throughputKBs > 0 {
+			ratio := maxRateKB / throughputKBs
+			if ratio > 2.0 {
+				accelBonus = 1.0 + math.Min(0.12, 0.02*(ratio-2.0))
+			}
 		}
 	}
 
-	factor := baseFactor * connectionFactor
+	historyPenalty := 1.0
+	if historyMaxRateKB > 0 {
+		r := maxRateKB / historyMaxRateKB
+		if r < 0.5 {
+			historyPenalty = 0.6 + (1.0-0.6)*r
+		} else if r < 0.9 {
+			historyPenalty = 0.85 + 0.15*r
+		} else if r > 1.2 {
+			historyPenalty = 1.0 + math.Min(0.05, 0.02*(r-1.2))
+		}
+	}
+
+	combinedRate := rateBonus * accelBonus * historyPenalty
+
+	if historyMaxRateKB > 0 {
+		historyRatio := maxRateKB / historyMaxRateKB
+		throughputKBs := (trafficMB * 1024.0) / math.Max(1.0, durationMinutes*60.0)
+
+		historyAvgKBs := 0.0
+		if historyTotalMB > 0 && historyConnDuration > 0 {
+			historyAvgKBs = (historyTotalMB * 1024.0) / math.Max(1.0, historyConnDuration*60.0)
+		}
+
+		lowThroughput := false
+		if historyAvgKBs > 0 {
+			lowThroughput = throughputKBs < 0.3*historyAvgKBs
+		} else {
+			lowThroughput = throughputKBs < 10.0
+		}
+
+		if historyRatio < 0.1 && lowThroughput {
+			evidence := 0.0
+			if historyConnDuration > 0 && durationMinutes > 0 {
+				ratio := historyConnDuration / durationMinutes
+				evidence = math.Min(1.0, math.Max(0.0, (ratio-1.0)/4.0))
+			}
+
+			penalty := 1.0 - 0.5*evidence
+			combinedRate *= penalty
+		}
+	}
+
+	if combinedRate > 1.25 {
+		combinedRate = 1.25
+	}
+
+	var connectionFactor float64
+	throughput := trafficMB / math.Max(1.0, durationMinutes)
+	if isShort {
+		connectionFactor = 1.0 + 0.06*math.Min(1, throughput/25.0)
+	} else {
+		connectionFactor = 1.0
+		if throughput > 5 {
+			connectionFactor += 0.05 * math.Min(1, (throughput-5)/80.0)
+		}
+	}
+
+	factor := baseFactor * combinedRate * connectionFactor
 
 	return math.Min(1.25, factor)
 }

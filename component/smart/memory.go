@@ -28,6 +28,7 @@ func InitCache() {
 
 	unwrapCache = lru.New[string, UnwrapMap](
 		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets / 4),
+		lru.WithAge[string, UnwrapMap](300),
 	)
 
 	recordCache = lru.New[string, *AtomicStatsRecord](
@@ -380,7 +381,7 @@ func (s *Store) AdjustCacheParameters() {
 		globalCacheParams.BatchSaveThreshold)
 
 	targetCache = lru.ResetLRU(targetCache, globalCacheParams.MaxTargets / 4)
-	unwrapCache = lru.ResetLRU(unwrapCache, globalCacheParams.MaxTargets / 4)
+	unwrapCache = lru.ResetLRU(unwrapCache, globalCacheParams.MaxTargets / 4, lru.WithAge[string, UnwrapMap](300))
 	recordCache = lru.ResetLRU(recordCache, globalCacheParams.MaxTargets / 4)
 	dbResultCache = lru.ResetLRU(dbResultCache, globalCacheParams.MaxTargets / 4, lru.WithAge[string, map[string][]byte](300))
 	blockedNodesCache = lru.ResetLRU(blockedNodesCache, globalCacheParams.MaxTargets / 4, lru.WithAge[string, map[string]bool](300))
