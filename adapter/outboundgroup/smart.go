@@ -541,6 +541,11 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 		}
 	}
 
+	// Unwrap result should not filled
+	if unwrap && len(selected) > 0 {
+		return selected
+	}
+
 	if len(selected) > 0 {
 		filtered := make([]C.Proxy, 0, len(selected))
 		for _, p := range selected {
@@ -578,11 +583,6 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 		if len(filtered) > 0 {
 			selected = filtered
 		}
-	}
-
-	// Unwrap result should not filled
-	if unwrap && len(selected) > 0 {
-		return selected
 	}
 
 	if len(selected) >= len(all) {
