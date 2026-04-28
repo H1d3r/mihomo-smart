@@ -1402,38 +1402,26 @@ func (s *Store) CleanupOldRecords(group, config string) error {
 		}
 
 		totalRecords := len(targetMap)
-		if totalRecords <= maxTargets * 2 {
-			continue
-		}
-
 		toDeleteCount := totalRecords - maxTargets
+		if toDeleteCount < 0 {
+			toDeleteCount = 0
+		}
 		deleted := 0
 
-		for _, path := range invalidTargets {
-			if deleted >= toDeleteCount {
-				break
+		sort.Slice(validTargets, func(i, j int) bool {
+			infoI := targetMap[validTargets[i]]
+			infoJ := targetMap[validTargets[j]]
+			if infoI.value != infoJ.value {
+				return infoI.value < infoJ.value
 			}
-			info := targetMap[path]
-			if delErr := s.DBBatchDeletePrefix(path, false); delErr != nil {
-				log.Debugln("[SmartStore] Failed to clean invalid [%s] for keyType [%s], group [%s]: %v", info.target, keyType, group, delErr)
-				continue
-			}
-			deleted++
-		}
+			return infoI.time.Before(infoJ.time)
+		})
 
-		if deleted < toDeleteCount {
-			remaining := toDeleteCount - deleted
-			sort.Slice(validTargets, func(i, j int) bool {
-				infoI := targetMap[validTargets[i]]
-				infoJ := targetMap[validTargets[j]]
-				if infoI.value != infoJ.value {
-					return infoI.value < infoJ.value
-				}
-				return infoI.time.Before(infoJ.time)
-			})
-			for i := 0; i < remaining && i < len(validTargets); i++ {
-				path := validTargets[i]
-				info := targetMap[path]
+		for i := 0; i < len(validTargets); i++ {
+			path := validTargets[i]
+			info := targetMap[path]
+			shouldDeleteByCount := deleted < toDeleteCount && totalRecords > maxTargets*2
+			if shouldDeleteByCount || time.Since(info.time) > RecordExpiredTime {
 				if delErr := s.DBBatchDeletePrefix(path, false); delErr != nil {
 					log.Debugln("[SmartStore] Failed to clean valid [%s] for keyType [%s], group [%s]: %v", info.target, keyType, group, delErr)
 					continue
@@ -1442,10 +1430,20 @@ func (s *Store) CleanupOldRecords(group, config string) error {
 			}
 		}
 
-		dbResultCache.RemoveByKeyPrefix(pathPrefix)
+		for _, path := range invalidTargets {
+			info := targetMap[path]
+			if delErr := s.DBBatchDeletePrefix(path, false); delErr != nil {
+				log.Debugln("[SmartStore] Failed to clean invalid [%s] for keyType [%s], group [%s]: %v", info.target, keyType, group, delErr)
+				continue
+			}
+			deleted++
+		}
 
-		log.Debugln("[SmartStore] Cleaned up [%d] old [%s] records, group [%s] keeping [%d] valuable and recent data...",
-			deleted, keyType, group, totalRecords - deleted)
+		if deleted > 0 {
+			dbResultCache.RemoveByKeyPrefix(pathPrefix)
+			log.Debugln("[SmartStore] Cleaned up [%d] old [%s] records, group [%s] keeping [%d] valuable and recent data...",
+				deleted, keyType, group, totalRecords - deleted)
+		}
 	}
 
 	return nil

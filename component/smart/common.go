@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/metacubex/bbolt"
 	"github.com/metacubex/mihomo/common/atomic"
@@ -46,6 +47,8 @@ const (
 	MinTargetsLimit         = 500
 	MaxBatchThreshLimit     = 300
 	MinBatchThreshLimit     = 50
+
+	RecordExpiredTime       = 7 * 24 * time.Hour
 
 	AllowedWeight           = 0.4
 
