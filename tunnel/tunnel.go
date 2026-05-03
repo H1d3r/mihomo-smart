@@ -459,7 +459,12 @@ func handleUDPConn(packet C.PacketAdapter) {
 			}
 			logMetadata(metadata, rule, rawPc)
 
-			pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, metadata, rule, 0, 0, true)
+			// recover info to dialMetadata for smart
+			dialMetadata.Host = metadata.Host 
+			dialMetadata.SmartTarget = metadata.SmartTarget
+			dialMetadata.SmartBlock = metadata.SmartBlock
+
+			pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, dialMetadata, rule, 0, 0, true)
 
 			sender.AddMapping(originMetadata, dialMetadata)
 			oAddrPort := dialMetadata.AddrPort()
@@ -667,6 +672,8 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 
 			if ! smart {
 				metadata.SmartTarget = ""
+			} else {
+				metadata.SmartBlock = "normal"
 			}
 
 			if passed {

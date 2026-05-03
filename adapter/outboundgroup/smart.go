@@ -622,8 +622,6 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		metadata.SmartTarget = smart.GetEffectiveTarget(metadata.Host, metadata.DstIP.String())
 	}
 
-	metadata.SmartBlock = "normal"
-
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {

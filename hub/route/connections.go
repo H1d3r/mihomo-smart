@@ -89,7 +89,7 @@ func closeAllConnections(w http.ResponseWriter, r *http.Request) {
 
 func setSmartBlock(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if c := c := statistic.DefaultManager.Get(id); c != nil {
+	if c := statistic.DefaultManager.Get(id); c != nil {
 		c.Info().Metadata.SmartBlock = "blocked"
 		_ = c.Close()
 	}
