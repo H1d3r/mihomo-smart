@@ -842,7 +842,7 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]bool) int 
 
 				// Clean up prefetch results if node stats expired, otherwise they may stay in prefetch results even if they are recovered.
 				for node := range finalNodeMap {
-					if !proxyMap[node] {
+					if !proxyMap[node] && finalNodeMap[node] > AllowedWeight {
 						delete(finalNodeMap, node)
 						continue
 					}

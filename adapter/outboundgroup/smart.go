@@ -79,6 +79,8 @@ type Smart struct {
 	useLightGBM            bool
 	collectData            bool
 	preferASN	           bool
+
+	stableNodes            atomic.TypedValue[map[string]bool]
 }
 
 type dialResult struct {
@@ -133,6 +135,7 @@ func NewSmart(option *GroupCommonOption, providers []provider.ProxyProvider, opt
 		disableUDP:           option.DisableUDP,
 		policyPriority:       make([]priorityRule, 0),
 		sampleRate:           1,
+		stableNodes:          atomic.NewTypedValue(map[string]bool{}),
 	}
 
 	for _, option := range options {
@@ -231,7 +234,6 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 
 func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	availableProxies := s.GetProxies(true)
-	metadata.SmartBlock = "normal"
 
 	getBatch := func(proxies []C.Proxy, i int) ([]C.Proxy, time.Duration) {
 		var batch []C.Proxy
@@ -305,8 +307,6 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	var availableProxies []C.Proxy
 	
 	proxies := s.GetProxies(true)
-	metadata.SmartBlock = "normal"
-
 	availableProxies = s.selectProxies(metadata, proxies)
 	
 	for i := 0; i < len(availableProxies) && i < 3; i++ {
@@ -464,64 +464,8 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func calcMADThreshold(delays []float64) float64 {
-	n := len(delays)
-	if n == 0 {
-		return 0
-	}
-
-	var median float64
-	if n % 2 == 1 {
-		median = delays[n / 2]
-	} else {
-		median = (delays[n / 2 - 1] + delays[n / 2]) / 2
-	}
-
-	devs := make([]float64, 0, n)
-	for _, v := range delays {
-		devs = append(devs, math.Abs(v - median))
-	}
-	sort.Float64s(devs)
-
-	var mad float64
-	if n % 2 == 1 {
-		mad = devs[n / 2]
-	} else {
-		mad = (devs[n / 2 - 1] + devs[n / 2]) / 2
-	}
-
-	if mad == 0 {
-		// fallback to mean + 2*std
-		mean := 0.0
-		for _, v := range delays {
-			mean += v
-		}
-		mean /= float64(n)
-		varSum := 0.0
-		for _, v := range delays {
-			d := v - mean
-			varSum += d * d
-		}
-		std := math.Sqrt(varSum / float64(n))
-		return mean + 2 * std
-	}
-
-	const scale = 1.4826
-	const defaultK = 2.5
-	const smallK = 3.5
-
-	k := defaultK
-	if n < maxSelected {
-		k = smallK
-	}
-
-	threshold := median + k * scale * mad
-	return threshold
-}
-
-func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, unwrap bool) []C.Proxy {
+func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes, _ := s.store.GetBlockedNodes(s.Name(), s.configName)
-
 	proxyByName := make(map[string]C.Proxy)
 	for _, p := range all {
 		proxyByName[p.Name()] = p
@@ -542,47 +486,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 	}
 
 	// Unwrap result should not filled
-	if unwrap && len(selected) > 0 {
+	if weights == nil && len(selected) > 0 {
 		return selected
-	}
-
-	if len(selected) > 0 {
-		filtered := make([]C.Proxy, 0, len(selected))
-		for _, p := range selected {
-			if len(filtered) >= minCount {
-				break
-			}
-
-			histories := p.DelayHistoryForTestUrl(s.testUrl)
-			if len(histories) == 0 {
-				filtered = append(filtered, p)
-				continue
-			}
-
-			delays := make([]float64, 0, len(histories))
-			for _, h := range histories {
-				if h.Delay == 0 {
-					h.Delay = 0xffff
-				}
-				delays = append(delays, float64(h.Delay))
-			}
-
-			sort.Float64s(delays)
-			threshold := calcMADThreshold(delays)
-
-			if threshold <= 0 {
-				continue
-			}
-
-			lastDelay := delays[len(delays)-1]
-			if lastDelay <= threshold {
-				filtered = append(filtered, p)
-			}
-		}
-
-		if len(filtered) > 0 {
-			selected = filtered
-		}
 	}
 
 	if len(selected) >= len(all) {
@@ -593,75 +498,80 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 		return selected[:minCount]
 	}
 
-	checkWeightsMap := make(map[string]float64)
-	for i, name := range names {
-		if weights != nil && i < len(weights) {
-			checkWeightsMap[name] = weights[i]
+	defaultSort := func (proxies []C.Proxy) []C.Proxy {
+		delays := make([]uint16, len(proxies))
+		for i, p := range proxies {
+			delays[i] = p.LastDelayForTestUrl(s.testUrl)
+		}
+
+		sort.Slice(proxies, func(i, j int) bool {
+			di, dj := delays[i], delays[j]
+			if di == dj {
+				return proxies[i].Name() < proxies[j].Name()
+			}
+			return di < dj
+		})
+
+		if len(s.policyPriority) > 0 {
+			proxiesFactor := make(map[string]float64, len(proxies))
+			for _, p := range proxies {
+				proxiesFactor[p.Name()] = s.getPriorityFactor(p.Name())
+			}
+
+			sort.SliceStable(proxies, func(i, j int) bool {
+				factorI := proxiesFactor[proxies[i].Name()]
+				factorJ := proxiesFactor[proxies[j].Name()]
+				return factorI > factorJ
+			})
+		}
+
+		return proxies
+	}
+
+	filteredAll := make([]C.Proxy, 0, len(all))
+
+	checkNodeUsed := make(map[string]bool, len(names))
+	if len(names) > 0 {
+		for _, name := range names {
+			checkNodeUsed[name] = true
 		}
 	}
 
-	filteredAll := []C.Proxy{}
-	for _, p := range all {
-		if _, exists := checkWeightsMap[p.Name()]; !exists && !blockedNodes[p.Name()] && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
+	stableNodes := s.stableNodes.Load()
+	if len(stableNodes) > 0 {
+		for name := range stableNodes {
+			p, ok := proxyByName[name]
+			if !ok || checkNodeUsed[name] {
+				continue
+			}
+			if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) {
+				continue
+			}
+			filteredAll = append(filteredAll, p)
+		}
+	} else {
+		for _, p := range all {
+			name := p.Name()
+			if checkNodeUsed[name] {
+				continue
+			}
+			if blockedNodes[name] {
+				continue
+			}
+			if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) {
+				continue
+			}
 			filteredAll = append(filteredAll, p)
 		}
 	}
 
-	n := len(filteredAll)
-	delaysMap := make(map[string]uint16, n)
-	for _, p := range filteredAll {
-		delaysMap[p.Name()] = p.LastDelayForTestUrl(s.testUrl)
-	}
+	filteredAll = defaultSort(filteredAll)
 
-	sort.Slice(filteredAll, func(i, j int) bool {
-		di := delaysMap[filteredAll[i].Name()]
-		dj := delaysMap[filteredAll[j].Name()]
-		if di == dj {
-			return filteredAll[i].Name() < filteredAll[j].Name()
-		}
-		return di < dj
-	})
-
-	if len(s.policyPriority) > 0 {
-		proxiesFactor := make(map[string]float64, len(filteredAll))
-		for _, p := range filteredAll {
-			proxiesFactor[p.Name()] = s.getPriorityFactor(p.Name())
-		}
-
-		sort.SliceStable(filteredAll, func(i, j int) bool {
-			factorI := proxiesFactor[filteredAll[i].Name()]
-			factorJ := proxiesFactor[filteredAll[j].Name()]
-			return factorI > factorJ
-		})
-	} else {
-		if n > minCount && len(selected) > minCount / 2 {
-			delays := make([]float64, n)
-			for i := 0; i < n; i++ {
-				delays[i] = float64(delaysMap[filteredAll[i].Name()])
-			}
-
-			threshold := calcMADThreshold(delays)
-
-			normal := make([]C.Proxy, 0, n)
-			outliers := make([]C.Proxy, 0, n)
-			for _, p := range filteredAll {
-				if float64(delaysMap[p.Name()]) <= threshold {
-					normal = append(normal, p)
-				} else {
-					outliers = append(outliers, p)
-				}
-			}
-
-			if len(normal) == 0 || len(outliers) == 0 {
-				rand.Shuffle(len(filteredAll), func(i, j int) {
-					filteredAll[i], filteredAll[j] = filteredAll[j], filteredAll[i]
-				})
-			} else {
-				rand.Shuffle(len(normal), func(i, j int) {
-					normal[i], normal[j] = normal[j], normal[i]
-				})
-				filteredAll = append(normal, outliers...)
-			}
+	if len(s.policyPriority) == 0 {
+		if len(selected) > minCount / 2 {
+			rand.Shuffle(len(filteredAll), func(i, j int) {
+				filteredAll[i], filteredAll[j] = filteredAll[j], filteredAll[i]
+			})
 		}
 	}
 
@@ -681,22 +591,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 	}
 
 	if len(selected) == 0 {
-		allN := len(all)
-		allDelays := make([]uint16, allN)
-		for i := 0; i < allN; i++ {
-			allDelays[i] = all[i].LastDelayForTestUrl(s.testUrl)
-		}
-
-		sort.Slice(all, func(i, j int) bool {
-			di := allDelays[i]
-			dj := allDelays[j]
-			if di == dj {
-				return all[i].Name() < all[j].Name()
-			}
-			return di < dj
-		})
-
-		for _, p := range all {
+		fallbackAll := defaultSort(all)
+		for _, p := range fallbackAll {
 			if p.AliveForTestUrl(s.testUrl) {
 				selected = append(selected, p)
 			}
@@ -704,13 +600,13 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 				break
 			}
 		}
-	}
 
-	if len(selected) == 0 {
-		for _, p := range all {
-			selected = append(selected, p)
-			if len(selected) >= minCount {
-				break
+		if len(selected) == 0 {
+			for _, p := range fallbackAll {
+				selected = append(selected, p)
+				if len(selected) >= minCount {
+					break
+				}
 			}
 		}
 	}
@@ -726,6 +622,8 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		metadata.SmartTarget = smart.GetEffectiveTarget(metadata.Host, metadata.DstIP.String())
 	}
 
+	metadata.SmartBlock = "normal"
+
 	if s.selected != "" {
 		for _, p := range proxies {
 			if p.Name() == s.selected {
@@ -734,27 +632,27 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) []C.Proxy
 		}
 	}
 
-	trySelector := func(isUDP bool) ([]string, []float64, bool) {
+	trySelector := func(isUDP bool) ([]string, []float64) {
 		// 检查匹配缓存
 		if proxiesName := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, isUDP); len(proxiesName) > 0 {
-			return proxiesName, nil, true
+			return proxiesName, nil
 		}
 
 		// 检查预解析缓存
 		if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, isUDP); len(proxiesName) > 0 {
-			return proxiesName, weights, false
+			return proxiesName, weights
 		}
 
 		// 实时计算最佳节点
 		if proxiesName, weights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, metadata.SmartTarget, asnNumber, isUDP); err == nil && len(proxiesName) > 0 {
-			return proxiesName, weights, false
+			return proxiesName, weights
 		}
 
-		return []string{}, []float64{}, false
+		return []string{}, []float64{}
 	}
 
-	resultNames, resultWeights, unwrap := trySelector(metadata.NetWork == C.UDP)
-	result := s.filterProxies(metadata, resultNames, resultWeights, proxies, maxSelected, metadata.NetWork == C.UDP, unwrap)
+	resultNames, resultWeights := trySelector(metadata.NetWork == C.UDP)
+	result := s.filterProxies(metadata, resultNames, resultWeights, proxies, maxSelected, metadata.NetWork == C.UDP)
 
 	return result
 }
@@ -851,14 +749,8 @@ func (s *Smart) startTimedTask(initialDelay, interval time.Duration, taskName st
 }
 
 func (s *Smart) runPrefetch() {
-	proxies := s.GetProxies(true)
-	proxyMap := make(map[string]bool)
 	blockedNodes, _ := s.store.GetBlockedNodes(s.Name(), s.configName)
-	for _, p := range proxies {
-		if p.AliveForTestUrl(s.testUrl) && !blockedNodes[p.Name()] {
-			proxyMap[p.Name()] = true
-		}
-	}
+	proxyMap := s.checkNodesStable(s.GetProxies(true), blockedNodes)
 	s.store.RunPrefetch(s.Name(), s.configName, proxyMap)
 }
 
@@ -1033,6 +925,199 @@ func (s *Smart) saveStatsRecord(target string, proxy C.Proxy, record *smart.Stat
     }()
 }
 
+func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable bool) {
+	n := len(delays)
+	if n == 0 {
+		return false, false
+	}
+
+	var median float64
+	var mad float64
+	var robustCV float64
+	var threshold float64
+
+	const scale = 1.4826
+	const defaultK = 2.5
+	const smallK = 3.5
+	const cvThreshold = 0.6
+	const minSamplesForCV = 5
+	const sentinel = float64(0xffff)
+
+	filtered := make([]float64, 0, n)
+	for _, v := range delays {
+		if v >= sentinel {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+
+	if float64(n - len(filtered)) / float64(n) > 0.5 {
+		unstable = true
+	}
+
+	m := len(filtered)
+	if m == 0 {
+		currentAnomaly = true
+		return currentAnomaly, unstable
+	}
+
+	sort.Float64s(filtered)
+
+	if m % 2 == 1 {
+		median = filtered[m / 2]
+	} else {
+		median = (filtered[m / 2 - 1] + filtered[m / 2]) / 2
+	}
+
+	devs := make([]float64, 0, m)
+	for _, v := range filtered {
+		devs = append(devs, math.Abs(v - median))
+	}
+	sort.Float64s(devs)
+
+	if m % 2 == 1 {
+		mad = devs[m / 2]
+	} else {
+		mad = (devs[m / 2 - 1] + devs[m / 2]) / 2
+	}
+
+	if mad == 0 {
+		mean := 0.0
+		for _, v := range filtered {
+			mean += v
+		}
+		mean /= float64(m)
+		varSum := 0.0
+		for _, v := range filtered {
+			d := v - mean
+			varSum += d * d
+		}
+		std := math.Sqrt(varSum / float64(m))
+		threshold = mean + 2 * std
+		last := delays[n - 1]
+		if last >= sentinel {
+			currentAnomaly = true
+		} else {
+			currentAnomaly = last > threshold
+		}
+		return currentAnomaly, unstable
+	}
+
+	k := defaultK
+	if m < maxSelected {
+		k = smallK
+	}
+
+	threshold = median + k * scale * mad
+
+	if median > 0 {
+		robustCV = scale * mad / median
+	} else {
+		robustCV = 0
+	}
+
+	last := delays[n - 1]
+	if last >= sentinel {
+		currentAnomaly = true
+	} else {
+		currentAnomaly = last > threshold
+	}
+
+	if !unstable {
+		if m >= minSamplesForCV {
+			unstable = robustCV >= cvThreshold
+		} else {
+			unstable = false
+		}
+	}
+
+	return currentAnomaly, unstable
+}
+
+func (s *Smart) checkNodesStable(proxies []C.Proxy, blockedNodes map[string]bool) map[string]bool {
+	var nodeState smart.NodeState
+	filted := make([]C.Proxy, 0, len(proxies))
+	proxiesMap := make(map[string]bool, len(proxies))
+	operations := make([]smart.StoreOperation, 0, len(proxies))
+	nodesToUpdate := make(map[string]*smart.NodeState, len(proxies))
+
+	for _, p := range proxies {
+		if !p.AliveForTestUrl(s.testUrl) || blockedNodes[p.Name()] {
+			continue
+		}
+
+		histories := p.DelayHistoryForTestUrl(s.testUrl)
+		if len(histories) == 0 {
+			proxiesMap[p.Name()] = true
+			continue
+		}
+
+		delays := make([]float64, 0, len(histories))
+		for _, h := range histories {
+			if h.Delay == 0 {
+				h.Delay = 0xffff
+			}
+			delays = append(delays, float64(h.Delay))
+		}
+
+		currentAnomaly, unstable := s.calcMADMetrics(delays)
+
+		if currentAnomaly || unstable {
+			filted = append(filted, p)
+			continue
+		}
+
+		proxiesMap[p.Name()] = true
+	}
+
+	if len(filted) > 0 {
+		nodeStateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
+		for _, p := range filted {
+			if data, exists := nodeStateData[p.Name()]; exists {
+				if err := json.Unmarshal(data, &nodeState); err == nil {
+					if nodeState.BlockedUntil > time.Now().Unix() {
+						nodeState.BlockedUntil = time.Unix(nodeState.BlockedUntil, 0).Add(prefetchInterval + 2 * time.Minute).Unix()
+					} else {
+						nodeState.BlockedUntil = time.Now().Add(prefetchInterval + 2 * time.Minute).Unix()
+					}
+					nodesToUpdate[p.Name()] = &nodeState
+					continue
+				}
+			}
+
+			nodeState = smart.NodeState{
+				Name:           p.Name(),
+				FailureCount:   0,
+				LastFailure:    0,
+				Degraded:       false,
+				DegradedFactor: 1.0,
+				BlockedUntil:   time.Now().Add(prefetchInterval + 2 * time.Minute).Unix(),
+			}
+			nodesToUpdate[p.Name()] = &nodeState
+		}
+
+		for nodeName, state := range nodesToUpdate {
+			data, err := json.Marshal(state)
+			if err != nil {
+				continue
+			}
+			operations = append(operations, smart.StoreOperation{
+				Type:   smart.OpSaveNodeState,
+				Group:  s.Name(),
+				Config: s.configName,
+				Node:   nodeName,
+				Data:   data,
+			})
+		}
+		s.store.AppendToGlobalQueue(operations...)
+		smart.ClearBlockedNodesCache(s.Name(), s.configName)
+	}
+
+	s.stableNodes.Store(proxiesMap)
+
+	return proxiesMap
+}
+
 // 检查节点屏蔽状态
 func (s *Smart) checkAndRecoverDegradedNodes() {
 	stateData, err := s.store.GetNodeStates(s.Name(), s.configName)
@@ -1084,6 +1169,10 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 			if err != nil {
 				continue
 			}
+			if state.DegradedFactor == 1.0 {
+				s.store.DBBatchDeletePrefix(smart.FormatDBKey(smart.KeyTypeNode, s.configName, s.Name(), nodeName), true)
+				continue
+			}
 			operations = append(operations, smart.StoreOperation{
 				Type:   smart.OpSaveNodeState,
 				Group:  s.Name(),
@@ -1093,6 +1182,7 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 			})
 		}
 		s.store.AppendToGlobalQueue(operations...)
+		smart.ClearBlockedNodesCache(s.Name(), s.configName)
 	}
 }
 
@@ -1105,7 +1195,10 @@ func (s *Smart) handleFailedConnection(proxyName string, oldWeight, calculatedWe
 	nodeStateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
 
 	if data, exists := nodeStateData[proxyName]; exists {
-		if json.Unmarshal(data, &nodeState) != nil {
+		if err := json.Unmarshal(data, &nodeState); err == nil {
+			nodeState.FailureCount++
+			nodeState.LastFailure = now
+		} else {
 			nodeState = smart.NodeState{
 				Name:           proxyName,
 				FailureCount:   1,
@@ -1113,9 +1206,6 @@ func (s *Smart) handleFailedConnection(proxyName string, oldWeight, calculatedWe
 				Degraded:       false,
 				DegradedFactor: 1.0,
 			}
-		} else {
-			nodeState.FailureCount++
-			nodeState.LastFailure = now
 		}
 	} else {
 		nodeState = smart.NodeState{
