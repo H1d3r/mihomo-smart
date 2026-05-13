@@ -48,6 +48,7 @@ const (
 	Sudoku
 	Masque
 	TrustTunnel
+	OpenVPN
 )
 
 const (
@@ -221,6 +222,8 @@ func (at AdapterType) String() string {
 		return "Masque"
 	case TrustTunnel:
 		return "TrustTunnel"
+	case OpenVPN:
+		return "OpenVPN"
 	case Relay:
 		return "Relay"
 	case Selector:
