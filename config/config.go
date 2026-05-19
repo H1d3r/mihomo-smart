@@ -70,6 +70,7 @@ type General struct {
 	LgbmAutoUpdate          bool                    `json:"lgbm-auto-update"`
 	LgbmUpdateInterval      int                     `json:"lgbm-update-interval"`
 	LgbmUrl                 string                  `json:"lgbm-url"`
+	SmartCollectorSize      float64                 `json:"smart-collector-size"`
 }
 
 // Inbound config
@@ -797,6 +798,7 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 		LgbmAutoUpdate:          cfg.LgbmAutoUpdate,
 		LgbmUpdateInterval:      cfg.LgbmUpdateInterval,
 		LgbmUrl:                 cfg.LgbmUrl,
+		SmartCollectorSize:      cfg.Profile.SmartCollectorSize,
 	}, nil
 }
 

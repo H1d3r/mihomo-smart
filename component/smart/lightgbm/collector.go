@@ -45,8 +45,6 @@ func InitCollector(collectSize float64) {
 		dataPath:           filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv"),
 		smartCollectorSize: smartCollectorSize,
 	}
-
-	log.Infoln("[Smart] Data collector initialized, max file size: %d MB", smartCollector.smartCollectorSize/(1024*1024))
 }
 
 func GetCollector() *DataCollector {

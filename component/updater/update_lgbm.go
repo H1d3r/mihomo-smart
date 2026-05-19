@@ -21,7 +21,6 @@ import (
 var (
 	lgbmAutoUpdate     bool
 	lgbmUpdateInterval int
-	lgbmUrl            string
 
 	updatingLgbm atomic.Bool
 )
@@ -34,9 +33,6 @@ func LgbmUpdateInterval() int {
 	return lgbmUpdateInterval
 }
 
-func LgbmUrl() string {
-	return lgbmUrl
-}
 
 func SetLgbmAutoUpdate(newAutoUpdate bool) {
 	lgbmAutoUpdate = newAutoUpdate
@@ -46,12 +42,9 @@ func SetLgbmUpdateInterval(newUpdateInterval int) {
 	lgbmUpdateInterval = newUpdateInterval
 }
 
-func SetLgbmUrl(newUrl string) {
-	lgbmUrl = newUrl
-}
 
 func UpdateLgbmModel() (err error) {
-	modelUrl := lgbmUrl
+	modelUrl := lightgbm.LgbmUrl()
 	if modelUrl == "" {
 		modelUrl = lightgbm.GetModelDownloadURL()
 	}

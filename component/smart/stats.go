@@ -1250,7 +1250,6 @@ func (s *Store) UpdateHostStatus(group, config, host, name string, maxFailedTime
 
 		stats.NodeFailures.Store(nfMap)
 		stats.Nodes.Store(nodesMap)
-
 		stats.LastFailure.Store(now)
 	} else {
 		nodesMap := stats.Nodes.Load()

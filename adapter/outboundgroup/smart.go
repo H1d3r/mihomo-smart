@@ -668,12 +668,9 @@ func (s *Smart) InitSmart() {
 	s.startTimedTask(10*time.Minute, cleanupInterval, "Group old records clean up", func() {
 		s.store.CleanupOldRecords(s.Name(), s.configName)
 	}, false)
-	s.startTimedTask(5*time.Second, checkInterval, "Init LGBM Collector", func() {
-		// load after tunnel.Running because size option ready later than group init
-		if s.collectData {
-			s.dataCollector = lightgbm.GetCollector()
-		}
-	}, true)
+	if s.collectData {
+		s.dataCollector = lightgbm.GetCollector()
+	}
 
 	if s.useLightGBM {
 		s.weightModel = lightgbm.GetModel()

@@ -98,7 +98,6 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	}
 
 	closeSmart()
-	updateSmartCollector(cfg.Profile)
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
@@ -185,7 +184,7 @@ func GetGeneral() *config.General {
 		DisableKeepAlive:        keepalive.DisableKeepAlive(),
 		LgbmAutoUpdate:          updater.LgbmAutoUpdate(),
 		LgbmUpdateInterval:      updater.LgbmUpdateInterval(),
-		LgbmUrl:                 updater.LgbmUrl(),
+		LgbmUrl:                 lightgbm.LgbmUrl(),
 	}
 
 	return general
@@ -383,7 +382,6 @@ func updateUpdater(cfg *config.Config) {
 
 	updater.SetLgbmAutoUpdate(general.LgbmAutoUpdate)
 	updater.SetLgbmUpdateInterval(general.LgbmUpdateInterval)
-	updater.SetLgbmUrl(general.LgbmUrl)
 
 	controller := cfg.Controller
 	updater.DefaultUiUpdater = updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
@@ -433,6 +431,8 @@ func updateGeneral(general *config.General, logging bool) {
 	geodata.SetGeoSiteUrl(general.GeoXUrl.GeoSite)
 	geodata.SetMmdbUrl(general.GeoXUrl.Mmdb)
 	geodata.SetASNUrl(general.GeoXUrl.ASN)
+	lightgbm.SetLgbmUrl(general.LgbmUrl)
+	lightgbm.InitCollector(general.SmartCollectorSize)
 	mihomoHttp.SetUA(general.GlobalUA)
 	resource.SetETag(general.ETagSupport)
 
@@ -541,10 +541,6 @@ func updateIPTables(cfg *config.Config) {
 	}
 
 	log.Infoln("[IPTABLES] Setting iptables completed")
-}
-
-func updateSmartCollector(c *config.Profile) {
-	lightgbm.InitCollector(c.SmartCollectorSize)
 }
 
 func closeSmart() {

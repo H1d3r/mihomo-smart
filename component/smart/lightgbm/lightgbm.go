@@ -30,6 +30,7 @@ var (
 	smartModel   *WeightModel
 	reloadModel  = singleflight.Group[bool]{StoreResult: false}
 	modelOnce    sync.Once
+	lgbmUrl      string
 
 	asnNumberRegex = regexp.MustCompile(`^(\d+)`)
 	domainRegex    = regexp.MustCompile(`([a-zA-Z0-9-]+)(\.[a-zA-Z0-9-]+)+$`)
@@ -507,8 +508,19 @@ func ReloadModel() {
 	}
 }
 
+func SetLgbmUrl(newUrl string) {
+	lgbmUrl = newUrl
+}
+
+func LgbmUrl() string {
+	return lgbmUrl
+}
+
 func downloadModel(path string) (err error) {
-	modelUrl := GetModelDownloadURL()
+	modelUrl := LgbmUrl()
+	if modelUrl == "" {
+		modelUrl = GetModelDownloadURL()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
 	defer cancel()
