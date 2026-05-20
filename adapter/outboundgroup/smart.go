@@ -39,7 +39,7 @@ const (
 	cleanupInterval          = 120 * time.Minute
 	cacheParamAdjustInterval = 5 * time.Minute
 	recoveryCheckInterval    = 5 * time.Minute
-	hostStatusCheckInterval  = 30 * time.Second
+	hostStatusCheckInterval  = 30 * time.Minute
 	checkInterval            = 10 * time.Minute
 	flushQueueInterval       = 5 * time.Minute
 	rankingInterval          = 5 * time.Minute
