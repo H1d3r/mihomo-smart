@@ -190,7 +190,7 @@ func (c *DataCollector) initializeWriter() error {
 			if err == nil {
 				hasMax := false
 				for _, h := range headers {
-					if h == "loss_rate" {
+					if h == "cumul_loss_rate" {
 						hasMax = true
 						break
 					}
@@ -255,7 +255,7 @@ func (c *DataCollector) initializeWriter() error {
 			"download_mb", "history_download_mb", "maxdownloadrate_kb", "history_maxdownloadrate_kb",
 			"duration_minutes", "history_duration_minutes", "last_used_seconds",
 			"is_udp", "is_tcp",
-			"loss_rate",
+			"loss_rate", "cumul_loss_rate",
 			"asn_feature",
 			"country_feature",
 			"address_feature",
